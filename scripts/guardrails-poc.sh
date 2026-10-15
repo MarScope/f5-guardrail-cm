@@ -845,7 +845,7 @@ PY
 wait_for_app() {
   if [[ "$DRY_RUN" == true ]]; then
     run kubectl wait --for=condition=ready pod -n "$MODERATOR_NAMESPACE" --all --timeout=900s
-    run kubectl wait --for=condition=ready pod -n "$INFERENCE_NAMESPACE" --all --timeout=1200s
+    run kubectl wait --for=condition=ready pod -n "$INFERENCE_NAMESPACE" --all --timeout=1800s
     return
   fi
 
@@ -856,7 +856,7 @@ wait_for_app() {
 
   log "Waiting for Moderator, PostgreSQL, and inference pods"
   kubectl wait --for=condition=ready pod -n "$MODERATOR_NAMESPACE" --all --timeout=900s || true
-  kubectl wait --for=condition=ready pod -n "$INFERENCE_NAMESPACE" --all --timeout=1200s || true
+  kubectl wait --for=condition=ready pod -n "$INFERENCE_NAMESPACE" --all --timeout=1800s || true
 }
 
 fix_prefect_workflows() {
