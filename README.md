@@ -14,6 +14,8 @@ The PoC uses:
 - Optional Route 53 DNS management
 - Self-signed TLS for lab access
 
+For a step-by-step, instructor-led walkthrough (deploy, connect Amazon Bedrock, test with LobeChat and a multi-agent app), see the [AI Security - EKS Lab Guide](docs/ai-security-eks-lab-guide.md).
+
 Route 53 is optional. If you do not use Route 53, the script still deploys the environment and prints the ingress load balancer hostname so you can create DNS manually with another provider.
 
 ## Architecture
