@@ -138,7 +138,7 @@ You do not need to know Kubernetes to finish this lab. The script in Section 2 r
 | Cluster | A group of servers managed as one system | One EKS cluster, `f5-guardrails-poc` by default |
 | Node | One server (an EC2 instance) in the cluster | Two GPU instances: `g5.4xlarge` and `g6e.2xlarge` |
 | Node group | A set of identical nodes that AWS manages | `guardrails-gpu-ng` and `redteam-gpu-ng` |
-| Security group | An AWS firewall attached to the nodes | You restrict it to your own IP address in 2.5 |
+| Security group | An AWS firewall attached to the nodes | The script restricts it to your IP address. You confirm that in 2.5. |
 | Pod | One running copy of an application | The F5 UI, the database, the scanner model, and so on |
 | Namespace | A folder that groups related pods | Five of them, listed in Section 2 |
 | Deployment | A rule that says "keep N copies of this pod running" | Restarts a pod if it crashes |
@@ -294,7 +294,7 @@ Pull the LobeChat image now so you are not waiting on it later. This lab uses th
 docker pull lobehub/lobe-chat:1.143.3
 ```
 
-Clone the two repositories. The first is a fork of the original automation at <https://github.com/yalmashad/f5-guardrail> with this guide added. The script and configuration are unchanged from the original.
+Clone the two repositories. The first is a fork of the original automation at <https://github.com/yalmashad/f5-guardrail>. The fork adds this guide and two safeguards in the script: it restricts the load balancer to your IP address and replaces the initial admin password during deployment.
 
 ```bash
 cd ~/f5-ai-lab
@@ -359,6 +359,8 @@ Open `config/guardrails-poc.env` in an editor and review these lines. Leave ever
 | `HOSTNAME` | The same value as `F5_HOST` in `lab.env` | The name you will type in the browser |
 | `ROUTE53_ENABLED` | `true` for DNS option A, `false` for option B | See the two options below |
 | `ENABLE_RED_TEAM` | `true` | Deploys AI Red Team (and with it Remediate) on a second GPU node. The example file ships with `false`, so you must change it. |
+| `ALLOWED_SOURCE_CIDRS` | `auto` (the default) | Who may reach the platform. `auto` is your own public IP address, detected when the script runs. To also let your instructor in, add their address: `"auto 203.0.113.10"`. |
+| `ROTATE_DEFAULT_PASSWORD` | `true` (the default) | The script replaces the initial password during deployment |
 | `OPERATOR_CHART_VERSION` | The version your instructor rehearsed | Keeps the whole class on one release |
 
 Choose how your hostname will resolve. Your instructor tells you which option the class uses.
@@ -376,7 +378,7 @@ Choose how your hostname will resolve. Your instructor tells you which option th
 Confirm your settings before you go on:
 
 ```bash
-grep -E '^(AWS_REGION|CLUSTER_NAME|HOSTNAME|ROUTE53_|ENABLE_RED_TEAM)' config/guardrails-poc.env
+grep -E '^(AWS_REGION|CLUSTER_NAME|HOSTNAME|ROUTE53_|ENABLE_RED_TEAM|RESTRICT_INGRESS_SOURCE|ALLOWED_SOURCE_CIDRS|ROTATE_DEFAULT_PASSWORD)' config/guardrails-poc.env
 ```
 
 ### 2.2 Add the F5 secrets
@@ -406,6 +408,16 @@ chmod 600 config/harbor.txt config/license.txt
 
 The header must show `Red Team enabled:       true` and a `Red Team node group` line. Every check should start with `[OK]`, including one each for the Guardrails and Red Team instance types, and for option A a `Route 53 hosted zone found` line. A `[WARN]` on the GPU quota line is acceptable. Any `[FAIL]` must be fixed before you continue. The message beside it says what is wrong.
 
+Look for the **Access control** block. It must show both of these:
+
+```text
+Access control
+  [OK]   Load balancer will only accept: <your IP>/32 (public IP of this machine: <your IP>)
+  [OK]   Initial admin password will be replaced before the ingress is created (...)
+```
+
+If you are on a VPN, the address shown is the VPN's exit address. Stay on the same network for the whole lab, or see "If your IP address changes" in 2.5.
+
 Optional but useful: preview the plan without changing anything.
 
 ```bash
@@ -432,14 +444,16 @@ What the script is doing while you wait:
 | 4. Operator | Installs the F5 AI Security Operator with Helm | 1-2 min |
 | 5. Platform | Tells the operator what to install. The operator creates the UI, database, job system, the Guardrails scanner model, and the Red Team model. Each model is pinned to its own node group. | 10-25 min |
 | 6. Workflows | Registers background jobs once the job system is healthy | 2-5 min |
-| 7. Ingress | Installs NGINX and creates an AWS load balancer | 2-4 min |
-| 8. TLS | Creates a self-signed certificate for your hostname | Seconds |
-| 9. DNS | Option A only: creates the Route 53 record and waits for the URL to answer | 1-10 min |
-| 10. Summary | Prints status and login details | Seconds |
+| 7. Admin password | Replaces the initial password in both login realms through a private connection into the cluster, then checks that `pass` is rejected. Saves the new password in `.secrets/admin-password`. | Under 1 min |
+| 8. Ingress | Installs NGINX and creates an AWS load balancer that accepts only your IP address | 2-4 min |
+| 9. TLS | Creates a self-signed certificate for your hostname | Seconds |
+| 10. DNS | Option A only: creates the Route 53 record and waits for the URL to answer | 1-10 min |
+| 11. Summary | Prints status and where to find the password | Seconds |
 
-> **When `up` finishes, go straight on to 2.5, 2.6, and 2.7 without a break.** The platform comes up with a well-known default password on an internet-facing load balancer. Those three steps restrict access to your IP address and replace the password.
-
-> **Option A only:** the last thing `up` does is test your public URL from your laptop. If your AWS account does not allow open inbound access, that test waits about ten minutes and then `up` ends with a `curl` error. The deployment itself is complete. Continue with 2.5.
+> **Two safeguards are built into `up`.** The platform ships with a published initial password (`admin` / `pass`) and sits behind an internet-facing load balancer. So that it is never exposed in that state, the script does two things in order:
+>
+> 1. **Stage 7** replaces the initial password while the platform is still reachable only from inside the cluster. If this fails, `up` stops and does not create the load balancer.
+> 2. **Stage 8** creates the load balancer already restricted to your IP address.
 
 To watch progress, open a **second** terminal:
 
@@ -459,56 +473,37 @@ The namespaces you will see:
 | `f5-ai-sec-inference` | The GPU models: the Guardrails scanner on the `g5.4xlarge` node and the Red Team model on the `g6e.2xlarge` node |
 | `nginx-ingress` | NGINX Ingress Controller and its AWS load balancer |
 
-### 2.5 Restrict access to your IP address (required)
+### 2.5 Confirm access is restricted to your IP address (required)
 
-The script puts the platform behind an internet-facing AWS load balancer. Traffic passes straight through that load balancer to the cluster nodes, so the firewall that decides who gets in is the **security group on the nodes**.
+The script put the platform behind an internet-facing AWS load balancer and told Kubernetes to accept only your address. Kubernetes enforces that by writing rules into the **security group on the cluster nodes**. In this step you confirm the result. Do not skip it.
 
-This step is required. When you finish it, the platform accepts connections from your public IP address and from nowhere else.
+**Check 1 - what the script reports.**
 
-**Step 1 - collect the three values.**
+```bash
+cd ~/f5-ai-lab/f5-guardrail-cm
+./scripts/guardrails-poc.sh status | grep -E 'Ingress access|Admin password'
+```
+
+Expected:
+
+```text
+Ingress access:            ready (restricted to <your IP>/32; this machine is <your IP>)
+Admin password:            ready (initial password rejected)
+```
+
+`Admin password` may say `unknown` until your hostname resolves in 2.6. That is fine for now. You check it again in Validate.
+
+**Check 2 - what AWS actually enforces.**
 
 ```bash
 source ~/f5-ai-lab/lab.env
-
-# Your public IP address, as AWS will see it
 MY_IP=$(curl -s https://checkip.amazonaws.com)
-
-# The security group attached to the cluster nodes
 SG_ID=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
   --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
-
-# The ports on the nodes that the load balancer forwards to (one for HTTP, one for HTTPS)
 NODE_PORTS=$(kubectl get svc -n nginx-ingress nginx-ingress-controller \
   -o jsonpath='{.spec.ports[*].nodePort}')
-
 echo "My IP: $MY_IP   Security group: $SG_ID   Node ports: $NODE_PORTS"
-```
 
-All three must print a value. The node ports are two numbers between 30000 and 32767. They are not 80 and 443, because the load balancer forwards to these high ports on the nodes.
-
-**Step 2 - allow your IP address.**
-
-```bash
-for PORT in $NODE_PORTS; do
-  aws ec2 authorize-security-group-ingress --region "$AWS_REGION" --group-id "$SG_ID" \
-    --ip-permissions "IpProtocol=tcp,FromPort=$PORT,ToPort=$PORT,IpRanges=[{CidrIp=$MY_IP/32,Description=f5-ai-lab-access}]"
-done
-```
-
-Each command prints `"Return": true`. An `InvalidPermission.Duplicate` error means the rule already exists, which is fine.
-
-**Step 3 - close access from everywhere else.** Kubernetes created the load balancer and, by default, opens it to the whole internet. Tell Kubernetes that only your address is allowed. It then removes its own open rule.
-
-```bash
-kubectl patch svc -n nginx-ingress nginx-ingress-controller --type merge \
-  -p '{"spec":{"loadBalancerSourceRanges":["'"$MY_IP"'/32"]}}'
-```
-
-To let a second address in as well, such as your instructor's, list both: `["1.2.3.4/32","5.6.7.8/32"]`, and repeat step 2 for that address.
-
-**Step 4 - confirm.** Wait one minute, then run both checks.
-
-```bash
 # Check A: your IP is allowed. Expect one row per node port.
 aws ec2 describe-security-group-rules --region "$AWS_REGION" \
   --filters "Name=group-id,Values=$SG_ID" \
@@ -520,21 +515,23 @@ aws ec2 describe-security-group-rules --region "$AWS_REGION" \
   --query 'SecurityGroupRules[?IsEgress==`false` && CidrIpv4==`0.0.0.0/0`].[FromPort,ToPort,Description]' --output table
 ```
 
-If check B still lists your node ports after two minutes, remove those rules by hand and tell your instructor:
+The node ports are two numbers between 30000 and 32767. They are not 80 and 443, because the load balancer forwards to these high ports on the nodes.
+
+You pass when check A lists your address and check B lists nothing. If either is wrong, see "Security group" under [Troubleshooting](#troubleshooting) and tell your instructor before going on.
+
+To see the same thing in the AWS console, open **EC2 > Security Groups**, search for the group ID printed above (its name starts with `eks-cluster-sg-`), and read **Inbound rules**.
+
+**If your IP address changes** (you join or leave a VPN, or move networks), the platform stops answering. Re-apply the restriction with your new address. This takes a few seconds and does not redeploy anything:
 
 ```bash
-for PORT in $NODE_PORTS; do
-  aws ec2 revoke-security-group-ingress --region "$AWS_REGION" --group-id "$SG_ID" \
-    --ip-permissions "IpProtocol=tcp,FromPort=$PORT,ToPort=$PORT,IpRanges=[{CidrIp=0.0.0.0/0}]"
-done
+./scripts/guardrails-poc.sh access
 ```
 
-**Console alternative for steps 2 and 4.** In the AWS console open **EC2 > Security Groups** and search for the group ID printed in step 1 (its name starts with `eks-cluster-sg-`). Under **Inbound rules > Edit inbound rules**, add one **Custom TCP** rule per node port with **Source** set to **My IP**, and delete any rule for those ports whose source is `0.0.0.0/0`. Step 3 still has to be run from the terminal, or Kubernetes will put the open rule back.
+**To let someone else in**, such as your instructor, add their address to `ALLOWED_SOURCE_CIDRS` in `config/guardrails-poc.env`, for example `"auto 203.0.113.10"`, and run the same `access` command.
 
 Things to know:
 
-- **Your IP can change.** Joining or leaving a VPN, or moving networks, changes it. If the UI stops responding later, rerun steps 1-4.
-- **Everything on your laptop shares this IP**, including the Docker containers in Section 4 and the app in Section 5, so one rule covers all of them.
+- **Everything on your laptop shares one public IP**, including the Docker containers in Section 4 and the app in Section 5, so one entry covers all of them.
 - **No cleanup is needed.** The security group is deleted with the cluster.
 
 ### 2.6 Make your hostname resolve
@@ -581,23 +578,30 @@ The hostname exists only on your laptop, so you add it to your hosts file.
 
    On Windows, also add the same line to `C:\Windows\System32\drivers\etc\hosts` (edit as Administrator) so your Windows browser can resolve the name.
 
-### 2.7 Change the initial password (required)
+### 2.7 Log in with your new admin password (required)
 
-Every deployment starts with the same published credentials: username `admin`, password `pass`. Replace the password now, before you do anything else in the UI.
+The script already replaced the initial password, so `admin` / `pass` no longer works. Your password was generated for you and saved on your laptop.
 
-1. Open `https://<your F5_HOST>` in a browser. The certificate is self-signed, so accept the browser warning.
-2. Log in with `admin` and `pass` to confirm the platform is up.
-3. The F5 UI has no password page. Change the password in the login service (Keycloak) instead. Passwords are separate in each realm, so do **both**:
+1. Read it:
 
-   ```text
-   https://<your F5_HOST>/auth/realms/master/account/#/security/signingin
-   https://<your F5_HOST>/auth/realms/calypsoai/account/#/security/signingin
+   ```bash
+   cat ~/f5-ai-lab/f5-guardrail-cm/.secrets/admin-password
    ```
 
-   On each page, sign in with the current password if asked, choose **Update** beside **Password**, and set a new one. Use the same new password in both realms so you have one thing to remember.
-4. Log out, then log back in to the F5 UI with the new password.
+2. Open `https://<your F5_HOST>` in a browser. The certificate is self-signed, so accept the browser warning.
+3. Log in as `admin` with that password.
+4. Save the password in a password manager. Do not copy it into `lab.env`.
 
-Store the new password in a password manager. Do not put it in `lab.env`.
+The same password is set in both login realms (`master` and `calypsoai`).
+
+**Optional - choose your own password.** The F5 UI has no password page, so use the login service (Keycloak) for each realm. On each page choose **Update** beside **Password**:
+
+```text
+https://<your F5_HOST>/auth/realms/master/account/#/security/signingin
+https://<your F5_HOST>/auth/realms/calypsoai/account/#/security/signingin
+```
+
+Then put the new password on the first line of `.secrets/admin-password`. The script signs in with that file whenever you rerun `up`, and stops if the file is out of date.
 
 ### 2.8 Save the lab certificate
 
@@ -621,6 +625,8 @@ cd ~/f5-ai-lab/f5-guardrail-cm
 Expected:
 
 ```text
+Ingress access:            ready (restricted to <your IP>/32; this machine is <your IP>)
+Admin password:            ready (initial password rejected)
 EKS cluster:               ACTIVE, Kubernetes 1.35, region us-east-1
 Node:                      2/2 Ready, type ...
 Guardrails node group:     ACTIVE, 1 desired (1-1), type g5.4xlarge
@@ -634,7 +640,7 @@ prefect:                   ready (...)
 nginx-ingress:             ready (1/1 replicas)
 ```
 
-Every component line must say `ready`, both node groups must be `ACTIVE`, and `Red Team` must say `enabled`. The `Node` line shows the instance type of only one of the two nodes.
+`Ingress access` and `Admin password` must both say `ready`. Every component line must say `ready`, both node groups must be `ACTIVE`, and `Red Team` must say `enabled`. The `Node` line shows the instance type of only one of the two nodes.
 
 > **Option A:** `status` also shows `Public URL: online` and `DNS: present`.
 >
@@ -648,7 +654,7 @@ curl -sS -o /dev/null -w 'HTTP %{http_code}\n' --cacert "$F5_CA" "https://$F5_HO
 
 `HTTP 200` (or a `30x` redirect) with no certificate error means the security group rule, name resolution, the load balancer, NGINX, TLS, and the F5 UI are all working. If the command hangs and times out, the security group is not letting you in. Repeat 2.5.
 
-Confirm the default password no longer works in either realm:
+Confirm for yourself that the initial password no longer works in either realm:
 
 ```bash
 for REALM in master calypsoai; do
@@ -659,9 +665,9 @@ for REALM in master calypsoai; do
 done
 ```
 
-Both lines must print `HTTP 401`. `HTTP 200` means that realm still accepts `admin` / `pass`. Go back to 2.7 and change it.
+Both lines must print `HTTP 401`. `HTTP 200` means that realm still accepts `admin` / `pass`. Stop and tell your instructor.
 
-Confirm access is restricted to your address. Run check B from 2.5 again. It must return no rows.
+Confirm access is still restricted to your address. Run check B from 2.5 again. It must return no rows.
 
 Confirm Red Team is deployed on its own node:
 
@@ -1079,7 +1085,7 @@ Then:
 
 - Delete the Bedrock API key in the AWS console (**Amazon Bedrock > API keys**).
 - Option B: remove the line you added to `/etc/hosts` (and the Windows hosts file, if used). Option A: `down` already removed the DNS record.
-- Delete `~/f5-ai-lab/lab.env`, `config/harbor.txt`, `config/license.txt`, and the `.env.*` files. They hold secrets.
+- Delete `~/f5-ai-lab/lab.env`, `config/harbor.txt`, `config/license.txt`, the `.secrets/` folder in `f5-guardrail-cm`, and the `.env.*` files. They hold secrets.
 
 ---
 
@@ -1097,12 +1103,17 @@ Then:
 | Pods in `ImagePullBackOff` | Harbor credentials wrong or expired | Fix `harbor.txt`, rerun `up` |
 | `f5-ai-sec-inference` pod `Pending` for more than 20 minutes | GPU not available to the pod | `kubectl describe pod <name> -n f5-ai-sec-inference` and read **Events** |
 | `up` exits silently right after the ingress install | Local `openssl` is too old for the `-addext` option | Install a current OpenSSL (1.1.1 or newer) and rerun `up` |
-| Browser or `curl` hangs, then times out | Your IP is not allowed in the node security group, or your IP changed (VPN, new network) | Repeat 2.5 |
+| Browser or `curl` hangs, then times out | Your IP changed (VPN, new network), so it is no longer the allowed address | `./scripts/guardrails-poc.sh access`, wait a minute, then rerun the checks in 2.5 |
+| `preflight` or `up` says it could not detect this machine's public IP | The lookup site is blocked on your network | Set `ALLOWED_SOURCE_CIDRS` to your address in `guardrails-poc.env` (find it by searching "what is my IP" in a browser) |
+| `up` stops with "Could not reach the login service" | The platform pods were not ready in time | `kubectl get pods -n cai-moderator`. When all are `Running`, rerun `up`. Nothing was exposed. |
+| `up` stops with "Could not sign in to replace the admin password" | The password was changed by hand and `.secrets/admin-password` does not match | Put the current password on the first line of `.secrets/admin-password` and rerun `up` |
+| `status` shows `Ingress access: failed (open to every address ...)` | The restriction is missing from the service | `./scripts/guardrails-poc.sh access` |
+| `status` shows `Admin password: failed (initial password still accepted ...)` | Password replacement was skipped or disabled | Rerun `up` with `ROTATE_DEFAULT_PASSWORD="true"`, or change it by hand as in 2.7 |
 | Browser says the site cannot be found | DNS record not yet visible (option A), or hosts entry missing or load balancer IP changed (option B) | Repeat 2.6 |
-| `up` ends with a `curl` error after "Waiting for public URL to respond" | Option A: your laptop could not reach the URL yet, usually the security group | The deployment is complete. Do 2.5, then run `status`. |
+| `up` prints a warning that the URL "did not answer from this machine yet" | Option A: DNS has not spread yet, or your IP is not the allowed one | The deployment is complete. Wait two minutes, run the checks in 2.5, then `status`. |
 | `preflight` fails on the Route 53 hosted zone | Option A: wrong `ROUTE53_ZONE_NAME` or `ROUTE53_HOSTED_ZONE_ID` | `aws route53 list-hosted-zones` and copy the right values |
 | `curl` reports a certificate error | Wrong hostname or stale certificate file | Repeat 2.8. The certificate is valid only for the exact `HOSTNAME`. |
-| Default-password check prints `HTTP 200` | Password not changed in that realm | Repeat 2.7 for that realm |
+| Default-password check prints `HTTP 200` | The initial password is still active in that realm | Rerun `up`. If it persists, change it by hand with the links in 2.7 and tell your instructor. |
 
 Detailed views when you need them:
 
@@ -1111,6 +1122,24 @@ kubectl get pods -A
 kubectl logs -n cai-moderator deploy/cai-moderator --tail=100
 kubectl logs -n f5-ai-sec deploy/controller-manager --tail=100
 kubectl logs -n f5-ai-sec-inference deploy/f5-ai-sec-inference --tail=100
+```
+
+#### Security group
+
+Use this only if check A or check B in 2.5 gives the wrong result after you have run `./scripts/guardrails-poc.sh access` and waited two minutes. It edits the security group directly, using the variables set in 2.5.
+
+```bash
+# Check A showed no rule for your IP: add one per node port.
+for PORT in $NODE_PORTS; do
+  aws ec2 authorize-security-group-ingress --region "$AWS_REGION" --group-id "$SG_ID" \
+    --ip-permissions "IpProtocol=tcp,FromPort=$PORT,ToPort=$PORT,IpRanges=[{CidrIp=$MY_IP/32,Description=f5-ai-lab-access}]"
+done
+
+# Check B still showed your node ports open to 0.0.0.0/0: remove those rules.
+for PORT in $NODE_PORTS; do
+  aws ec2 revoke-security-group-ingress --region "$AWS_REGION" --group-id "$SG_ID" \
+    --ip-permissions "IpProtocol=tcp,FromPort=$PORT,ToPort=$PORT,IpRanges=[{CidrIp=0.0.0.0/0}]"
+done
 ```
 
 ### Section 3 - Bedrock and connection
@@ -1128,7 +1157,7 @@ kubectl logs -n f5-ai-sec-inference deploy/f5-ai-sec-inference --tail=100
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Every message errors immediately | Container cannot resolve, reach, or trust the F5 hostname | `docker logs lobe-protected`. Check `--add-host` (option B needs `F5_LB_IP`), the security group rule (2.5), and the certificate mount. |
+| Every message errors immediately | Container cannot resolve, reach, or trust the F5 hostname | `docker logs lobe-protected`. Check `--add-host` (option B needs `F5_LB_IP`), that your IP is still the allowed one (2.5), and the certificate mount. |
 | Certificate errors persist in `docker logs` | The image ignores the extra CA | For this lab only, recreate the container adding `-e NODE_TLS_REJECT_UNAUTHORIZED=0`. Never do this outside a lab. |
 | Model list is empty | `OPENAI_MODEL_LIST` not applied | Recreate the container. Settings from an older container can persist in the browser, so try a private window. |
 | Replies are empty | Streaming is not passing through cleanly | Confirm with the `ask` helper that non-streaming works, then report to your instructor |
@@ -1140,7 +1169,7 @@ kubectl logs -n f5-ai-sec-inference deploy/f5-ai-sec-inference --tail=100
 | --- | --- | --- |
 | `ModuleNotFoundError: No module named 'dotenv'` | `python-dotenv` not installed | `pip install python-dotenv` |
 | Startup error mentioning `CONNECTION-NAME` | `CALYPSOAI_BASE_URL` not loaded | Check the `--env-file` path |
-| Run returns `{"detail":"Connection error."}` | Hostname not resolving, your IP not allowed, or certificate not trusted | Check name resolution (2.6), the security group rule (2.5), and `SSL_CERT_FILE` in the env file. Open a fresh terminal so no old `SSL_CERT_FILE` overrides it. |
+| Run returns `{"detail":"Connection error."}` | Hostname not resolving, your IP not allowed, or certificate not trusted | Check name resolution (2.6), that your IP is still the allowed one (2.5), and `SSL_CERT_FILE` in the env file. Open a fresh terminal so no old `SSL_CERT_FILE` overrides it. |
 | Happy path fails with a model or tool error | The model or connection does not support forced tool calls or JSON output | See Appendix B, item 2 |
 | App works but nothing appears in F5 logs | App is in mock mode | Mock mode only activates when no token is set. Check the env file. |
 
@@ -1167,7 +1196,8 @@ Reference: <https://docs.aisecurity.f5.com/onboarding/connections/connect-model-
 
 ### What was verified while writing this guide
 
-- **Automation behavior** (Section 2) was taken from `scripts/guardrails-poc.sh` and `config/guardrails-poc.env.example` in this repository: actions, stages, namespaces, secret file formats, certificate secret name, ingress routes, the Red Team node group and model placement, and `status` output including the Route 53-disabled wording. This repository's script and configuration are identical to the original at <https://github.com/yalmashad/f5-guardrail> (commit `9bb210f`).
+- **Automation behavior** (Section 2) was taken from `scripts/guardrails-poc.sh` and `config/guardrails-poc.env.example` in this repository: actions, stages, namespaces, secret file formats, certificate secret name, ingress routes, the Red Team node group and model placement, and `status` output including the Route 53-disabled wording. This repository started from the original at <https://github.com/yalmashad/f5-guardrail> (commit `9bb210f`) and adds the source-address restriction, the password replacement, and the `access` command.
+- **Script safeguards** were exercised locally with stand-ins, not on a cluster: the password-replacement logic against a stub of the Keycloak token, user-lookup, and reset-password endpoints (fresh run, rerun, existing password file, unknown password, missing realm, service unreachable), and the allow-list handling, `helm` arguments, `access` patch, and `status` lines against fake `kubectl` and `helm` commands. The NGINX chart's `controller.service.loadBalancerSourceRanges` value was confirmed in chart version 2.10.0.
 - **Multi-agent app behavior** (Section 5) was run locally from `f5devcentral/f5-ai-sec-multi-agent-system-app` on Python 3.13: mock mode, `/health`, scenario endpoints, the `python-dotenv` requirement for `--env-file`, and trust of a self-signed certificate through `SSL_CERT_FILE`. A local HTTPS stub confirmed the app calls `<base URL>/chat/completions`, sends `OPENAI_MODEL` as the model, and uses forced `tool_choice` and `response_format: json_object`.
 
 ### What must be rehearsed on a live deployment before class
@@ -1180,11 +1210,11 @@ None of the following could be tested without a licensed cluster. Run the whole 
 4. **LobeChat (Section 4).** Confirm the pinned tag `lobehub/lobe-chat:1.143.3` pulls, that `NODE_EXTRA_CA_CERTS` makes it trust the lab certificate, and that streamed replies pass through F5 AI Security. `lobehub/lobe-chat` is the v1 single-container image. The v2 image (`lobehub/lobehub`) needs PostgreSQL, Redis, and object storage and is not suitable for a short lab.
 5. **Leak scenario outcome (Check 2).** Whether the baseline answer contains the client data depends on the model following the injected text. Confirm it leaks on baseline and is stopped on protected with your guardrail set. If baseline does not leak, the lab still works as a logging comparison, but the contrast is weaker.
 6. **Operator version.** `guardrails-poc.env.example` pins `OPERATOR_CHART_VERSION="1.10.0"`. Pin the version you rehearse.
-7. **Security group step (2.5).** The script installs NGINX behind a Network Load Balancer with instance targets and no AWS Load Balancer Controller, so client traffic reaches the nodes on the service's node ports and is filtered by the node security group. The guide assumes eksctl-managed node groups use the EKS cluster security group. Confirm on a live cluster that (a) the cluster security group is the one attached to the nodes, (b) the manually added rule survives, (c) the `loadBalancerSourceRanges` patch removes the `0.0.0.0/0` rule so check B returns no rows, (d) load balancer health checks still pass afterwards, and (e) rerunning `up` does not reset the restriction. If your AWS account strips `0.0.0.0/0` rules automatically, tell students so the initial timeout is expected.
+7. **Source-address restriction (stage 8, step 2.5).** The script installs NGINX behind a Network Load Balancer with instance targets and no AWS Load Balancer Controller, and sets `loadBalancerSourceRanges` on the service when it is first created. Confirm on a live cluster that (a) the load balancer is never open to `0.0.0.0/0`, so check B is empty from the start, (b) Kubernetes writes the rules for the allowed addresses into the EKS cluster security group, so check A passes, (c) load balancer health checks pass, (d) `access` updates the rules within about a minute, and (e) rerunning `up` keeps the restriction.
 8. **Red Team placement and UI (Validate Section 2).** The pod-spread check and the **AI Red Team** menu label are inferred from the script's node selectors and the public documentation. Confirm both, and confirm the license enables Remediate.
 9. **Deployment time with Red Team.** The 35-60 minute figure is an estimate. The repository documents 25-45 minutes for Guardrails alone.
-10. **Default-password check (Validate Section 2).** The check posts `admin` / `pass` to each realm's Keycloak token endpoint with the built-in `admin-cli` client and expects `HTTP 401`. Confirm that both realms return 200 before the change and 401 after it. If a realm returns 404 or 400, adjust the check for your release.
-11. **Exposure window.** Between the load balancer coming up (stage 7) and the student finishing 2.5 and 2.7, the default credentials can be reachable from the internet. To remove the window entirely, add the source-range restriction and a password rotation to `guardrails-poc.sh` itself. That script change is not part of this guide.
+10. **Password replacement (stage 7).** The script port-forwards to `svc/cai-moderator` port 8080 (the same service and port the ingress uses for `/auth`), signs in to the `master` realm with `admin` / `pass` through the `admin-cli` client, resets the `admin` user's password in each realm through the Keycloak admin API, and then checks that `pass` is rejected. Confirm on a live cluster that (a) the login service answers under `/auth` on that port, (b) the `master` realm `admin` user can reset passwords in the `calypsoai` realm, (c) the platform keeps working afterwards, meaning nothing inside it depends on the initial password, and (d) the generated password satisfies the realms' password policies. If any of these fails, `up` stops before creating the load balancer. `ALLOW_DEFAULT_PASSWORD="true"` lets it continue, and `KEYCLOAK_SERVICE`, `KEYCLOAK_SERVICE_PORT`, and `KEYCLOAK_BASE_PATHS` adjust where it looks.
+11. **Default-password check (Validate Section 2).** The check and the `Admin password` line in `status` post `admin` / `pass` to each realm's token endpoint and treat `HTTP 200` as "still accepted". Confirm both realms return 200 on an unprotected deployment and 401 after stage 7.
 
 ### Class logistics
 

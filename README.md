@@ -172,7 +172,9 @@ Update `OPERATOR_CHART_VERSION` in `config/guardrails-poc.env` with the desired 
 
 Expected runtime is roughly 25-45 minutes for a new environment because EKS control plane, GPU node, add-ons, images, model pod, ingress load balancer, and DNS all need time to come online.
 
-At the end, the script prints a concise status summary with component health, UI URL, initial login credentials, and password-change links.
+Before it creates the ingress, the script replaces the initial admin password and restricts the load balancer to your source addresses. See [Access Control and First Login](#access-control-and-first-login).
+
+At the end, the script prints a concise status summary with component health, UI URL, where the admin password is stored, and password-change links.
 
 ### Status
 
@@ -189,6 +191,8 @@ Environment:               running
 Public URL:                online (https://guardrails.f5demo.io)
 DNS:                       present -> <load-balancer>
 Ingress LB:                ready -> <load-balancer>
+Ingress access:            ready (restricted to 198.51.100.7/32; this machine is 198.51.100.7)
+Admin password:            ready (initial password rejected)
 EKS cluster:               ACTIVE, Kubernetes 1.35, region us-east-1
 Node:                      1/1 Ready, type g5.4xlarge
 Guardrails node group:     ACTIVE, 1 desired (1-1), type g5.4xlarge
@@ -210,30 +214,54 @@ EBS leftovers:             none found
 
 This deletes Route 53 records when enabled, the EKS cluster, GPU node group, load balancer, EBS volumes created through the cluster, available leftover cluster-owned EBS volumes, and `eksctl` CloudFormation stacks.
 
-## First Login and Password Change
+## Access Control and First Login
 
-Initial credentials from the F5 runbook:
+The platform ships with published initial credentials (`admin` / `pass`) and the ingress is an internet-facing load balancer. `up` closes both gaps before anything is reachable from outside the cluster.
 
-```text
-Username: admin
-Password: pass
+### Source address restriction
+
+The ingress controller service is created with `loadBalancerSourceRanges`, so the load balancer only ever accepts the addresses you allow.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `RESTRICT_INGRESS_SOURCE` | `true` | Set to `false` to accept any address (not recommended) |
+| `ALLOWED_SOURCE_CIDRS` | `auto` | `auto` is the public IP of the machine running the script. Add more IPv4 addresses or CIDRs separated by spaces or commas, for example `auto 203.0.113.0/24`. |
+
+When your public IP changes (VPN, different network), re-apply the list without a full redeploy:
+
+```bash
+./scripts/guardrails-poc.sh access
 ```
 
-The Guardrails UI account page does not expose password management. Use the embedded Keycloak account console.
+`status` shows the current list and whether this machine is in it.
 
-For this PoC, change the password in the `master` realm:
+### Initial password replacement
 
-```text
-https://guardrails.f5demo.io/auth/realms/master/account/#/security/signingin
+After the platform pods are up and **before** the ingress is installed, the script reaches the embedded Keycloak through `kubectl port-forward` and replaces the password of `admin` in every realm in `GUARDRAILS_AUTH_REALMS`. It then checks that the initial password is rejected.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `ROTATE_DEFAULT_PASSWORD` | `true` | Set to `false` to keep the initial password until you change it by hand |
+| `ADMIN_PASSWORD_FILE` | `.secrets/admin-password` | First line is the admin password. Generated if the file does not exist. |
+| `GUARDRAILS_ADMIN_PASSWORD` (environment) | unset | Overrides the file |
+| `ALLOW_DEFAULT_PASSWORD` | `false` | By default `up` stops before creating the ingress if the password could not be replaced. Set to `true` to continue anyway. |
+
+Read the password:
+
+```bash
+cat .secrets/admin-password
 ```
 
-The deployment can also expose a `calypsoai` realm:
+Then log in at `https://<HOSTNAME>` as `admin`.
+
+The Guardrails UI account page does not expose password management. To choose your own password, use the embedded Keycloak account console for each realm, then put the new password on the first line of `.secrets/admin-password` so later `up` runs can still sign in:
 
 ```text
-https://guardrails.f5demo.io/auth/realms/calypsoai/account/#/security/signingin
+https://<HOSTNAME>/auth/realms/master/account/#/security/signingin
+https://<HOSTNAME>/auth/realms/calypsoai/account/#/security/signingin
 ```
 
-Keycloak passwords are realm-specific. If more than one realm accepts the initial password, rotate it in each realm.
+Keycloak passwords are realm-specific.
 
 ## Manual Deployment Reference
 
