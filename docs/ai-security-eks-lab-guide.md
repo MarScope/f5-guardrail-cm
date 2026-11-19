@@ -6,8 +6,8 @@ Hands-on lab: deploy F5 AI Security (Guardrails) on Amazon EKS, connect it to a 
 | --- | --- |
 | Audience | Engineers new to F5 AI Security. No Kubernetes experience is assumed. |
 | Format | Five sections. Each ends with a **Validate** step. Do not move on until it passes. |
-| Time | About 4 hours, of which 25-45 minutes is an unattended deployment wait in Section 2. |
-| Cost | One GPU node (`g5.4xlarge`) plus an EKS control plane and a load balancer run for the whole lab. Tear down in [Cleanup](#cleanup) when you finish. |
+| Time | About 4.5 hours, of which 35-60 minutes is an unattended deployment wait in Section 2. |
+| Cost | Two GPU nodes (`g5.4xlarge` for Guardrails, `g6e.2xlarge` for Red Team) plus an EKS control plane and a load balancer run for the whole lab. Tear down in [Cleanup](#cleanup) when you finish. |
 
 ## Contents
 
@@ -51,6 +51,8 @@ You create two **projects** in F5 AI Security. Each project has its own token:
 
 The token a client uses decides which project, and so which guardrails, apply. Sections 4 and 5 run each client twice, once per token, so you can compare side by side.
 
+**Red Team and Remediate:** this lab deploys AI Red Team alongside Guardrails so that follow-on labs can build on the same environment. Remediate is a capability of Red Team, not a separate install, so it is available once Red Team is running and licensed. Section 2 confirms both are deployed. The exercises in Sections 3-5 use Guardrails only.
+
 ## Kubernetes in five minutes
 
 You do not need to know Kubernetes to finish this lab. The script in Section 2 runs every Kubernetes command for you. These terms appear in its output:
@@ -58,8 +60,9 @@ You do not need to know Kubernetes to finish this lab. The script in Section 2 r
 | Term | Plain meaning | In this lab |
 | --- | --- | --- |
 | Cluster | A group of servers managed as one system | One EKS cluster, `f5-guardrails-poc` by default |
-| Node | One server (an EC2 instance) in the cluster | One `g5.4xlarge` GPU instance |
-| Node group | A set of identical nodes that AWS manages | `guardrails-gpu-ng` |
+| Node | One server (an EC2 instance) in the cluster | Two GPU instances: `g5.4xlarge` and `g6e.2xlarge` |
+| Node group | A set of identical nodes that AWS manages | `guardrails-gpu-ng` and `redteam-gpu-ng` |
+| Security group | An AWS firewall attached to the nodes | You add your own IP address to it in 2.5 |
 | Pod | One running copy of an application | The F5 UI, the database, the scanner model, and so on |
 | Namespace | A folder that groups related pods | Five of them, listed in Section 2 |
 | Deployment | A rule that says "keep N copies of this pod running" | Restarts a pod if it crashes |
@@ -73,7 +76,7 @@ You do not need to know Kubernetes to finish this lab. The script in Section 2 r
 The only `kubectl` commands you need:
 
 ```bash
-kubectl get nodes                      # Is the server up?
+kubectl get nodes                      # Are the servers up?
 kubectl get pods -A                    # What is running, in every namespace?
 kubectl get pods -n cai-moderator      # What is running in one namespace?
 kubectl describe pod <name> -n <ns>    # Why is this pod not starting? Read "Events" at the bottom.
@@ -119,10 +122,12 @@ You need four things. Your instructor supplies the two F5 items.
 | --- | --- | --- | --- |
 | 1 | AWS access key ID and secret access key | Your AWS account (IAM user or SSO) | Section 2 |
 | 2 | Harbor registry username and password for `harbor.calypsoai.app` | Instructor / F5 | Section 2 |
-| 3 | F5 AI Security license string | Instructor / F5 | Section 2 |
+| 3 | F5 AI Security license string that covers **Guardrails and Red Team** | Instructor / F5 | Section 2 |
 | 4 | Amazon Bedrock API key | You create it in step 1.7 | Section 3 |
 
-The AWS identity needs permission to manage EKS, EC2, IAM, CloudFormation, Elastic Load Balancing, and EBS, plus Route 53 if your class uses it. An administrator role in a sandbox account is the simplest choice.
+Remediate needs no license of its own. It comes with Red Team.
+
+The AWS identity needs permission to manage EKS, EC2, IAM, CloudFormation, Elastic Load Balancing, and EBS, including permission to edit security group rules. An administrator role in a sandbox account is the simplest choice.
 
 ### 1.4 Install the command-line tools
 
@@ -155,7 +160,7 @@ Enter the access key ID, the secret access key, the region (`us-east-1` unless y
 
 ### 1.6 Check the GPU quota
 
-AWS limits how many GPU instances an account can run. The lab needs **16 vCPUs** of "Running On-Demand G and VT instances" (24 if your class enables Red Team).
+AWS limits how many GPU instances an account can run. The lab needs **24 vCPUs** of "Running On-Demand G and VT instances": 16 for the Guardrails node and 8 for the Red Team node.
 
 ```bash
 aws service-quotas get-service-quota \
@@ -163,7 +168,7 @@ aws service-quotas get-service-quota \
   --region us-east-1 --query 'Quota.Value'
 ```
 
-If the number is below 16, request an increase in the AWS console under **Service Quotas > Amazon EC2 > Running On-Demand G and VT instances**. Approval can take hours, so do this well before class.
+If the number is below 24, request an increase in the AWS console under **Service Quotas > Amazon EC2 > Running On-Demand G and VT instances**. Approval can take hours, so do this well before class.
 
 ### 1.7 Create an Amazon Bedrock API key
 
@@ -186,6 +191,8 @@ export BEDROCK_MODEL="openai.gpt-oss-120b-1:0"
 export BEDROCK_API_KEY="PASTE-YOUR-BEDROCK-API-KEY"
 
 # --- Section 2 ---
+export AWS_REGION="us-east-1"                    # must match AWS_REGION in guardrails-poc.env
+export CLUSTER_NAME="f5-guardrails-CHANGEME"     # must match CLUSTER_NAME in guardrails-poc.env
 export F5_HOST="guardrails.ailab.test"          # must match HOSTNAME in guardrails-poc.env
 export F5_CA="$HOME/f5-ai-lab/guardrails-lab.crt"
 
@@ -197,7 +204,7 @@ EOF
 chmod 600 ~/f5-ai-lab/lab.env
 ```
 
-Edit the file and paste your Bedrock API key. Then load it. **Run this `source` command again in every new terminal window.**
+Edit the file: paste your Bedrock API key and replace `CHANGEME` in `CLUSTER_NAME` with your initials. Then load it. **Run this `source` command again in every new terminal window.**
 
 ```bash
 source ~/f5-ai-lab/lab.env
@@ -211,7 +218,7 @@ Pull the LobeChat image now so you are not waiting on it later. This lab uses th
 docker pull lobehub/lobe-chat:1.143.3
 ```
 
-Clone the two repositories:
+Clone the two repositories. The first is a fork of the original automation at <https://github.com/yalmashad/f5-guardrail> with this guide added. The script and configuration are unchanged from the original.
 
 ```bash
 cd ~/f5-ai-lab
@@ -271,14 +278,18 @@ Open `config/guardrails-poc.env` in an editor and review these lines. Leave ever
 
 | Setting | Set it to | Why |
 | --- | --- | --- |
-| `AWS_REGION` | Your class region, for example `us-east-1` | Where the cluster is built |
-| `CLUSTER_NAME` | `f5-guardrails-<your-initials>` | Must be unique if the class shares one AWS account |
+| `AWS_REGION` | The same value as `AWS_REGION` in `lab.env` | Where the cluster is built |
+| `CLUSTER_NAME` | The same value as `CLUSTER_NAME` in `lab.env` | Must be unique if the class shares one AWS account |
 | `HOSTNAME` | The same value as `F5_HOST` in `lab.env` | The name you will type in the browser |
-| `ROUTE53_ENABLED` | `false`, unless your instructor gives you a hosted zone | See 2.5 |
-| `ENABLE_RED_TEAM` | `false` | This lab covers Guardrails. Red Team needs a second GPU node and a license that includes it. |
+| `ROUTE53_ENABLED` | `false` | This lab uses a local hosts file (2.6) instead of public DNS |
+| `ENABLE_RED_TEAM` | `true` | Deploys AI Red Team (and with it Remediate) on a second GPU node. The example file ships with `false`, so you must change it. |
 | `OPERATOR_CHART_VERSION` | The version your instructor rehearsed | Keeps the whole class on one release |
 
-If your instructor provides a Route 53 hosted zone, also set `ROUTE53_ENABLED="true"`, `ROUTE53_ZONE_NAME`, and `ROUTE53_HOSTED_ZONE_ID`, and use a hostname inside that zone for both `HOSTNAME` and `F5_HOST`.
+Confirm the Red Team setting took effect before you go on:
+
+```bash
+grep -E '^(AWS_REGION|CLUSTER_NAME|HOSTNAME|ROUTE53_ENABLED|ENABLE_RED_TEAM)=' config/guardrails-poc.env
+```
 
 ### 2.2 Add the F5 secrets
 
@@ -305,7 +316,7 @@ chmod 600 config/harbor.txt config/license.txt
 ./scripts/guardrails-poc.sh preflight
 ```
 
-Every line should start with `[OK]`. A `[WARN]` on the GPU quota line is acceptable. Any `[FAIL]` must be fixed before you continue. The message beside it says what is wrong.
+The header must show `Red Team enabled:       true` and a `Red Team node group` line. Every check should start with `[OK]`, including one each for the Guardrails and Red Team instance types. A `[WARN]` on the GPU quota line is acceptable. Any `[FAIL]` must be fixed before you continue. The message beside it says what is wrong.
 
 Optional but useful: preview the plan without changing anything.
 
@@ -321,17 +332,17 @@ Each line that starts with `+` is a command the real run will execute.
 ./scripts/guardrails-poc.sh up
 ```
 
-Expect **25-45 minutes**. Leave this terminal alone. If your laptop sleeps or the script stops, run the same command again. It skips what already exists and continues.
+Expect **35-60 minutes**. The repository's own estimate is 25-45 minutes for Guardrails alone, and Red Team adds a second node and a larger model. Leave this terminal alone. If your laptop sleeps or the script stops, run the same command again. It skips what already exists and continues.
 
 What the script is doing while you wait:
 
 | Stage | What happens | Typical wait |
 | --- | --- | --- |
-| 1. Cluster | Creates the EKS cluster and the GPU node | 15-20 min |
+| 1. Cluster | Creates the EKS cluster and the Guardrails GPU node, then adds the Red Team GPU node group | 20-30 min |
 | 2. Storage | Adds the EBS storage driver so the database can keep its data | 2-3 min |
 | 3. Registry secret | Stores your Harbor credentials in the cluster so it can download F5 images | Seconds |
 | 4. Operator | Installs the F5 AI Security Operator with Helm | 1-2 min |
-| 5. Platform | Tells the operator what to install. The operator creates the UI, database, job system, and scanner model. | 10-20 min |
+| 5. Platform | Tells the operator what to install. The operator creates the UI, database, job system, the Guardrails scanner model, and the Red Team model. Each model is pinned to its own node group. | 10-25 min |
 | 6. Workflows | Registers background jobs once the job system is healthy | 2-5 min |
 | 7. Ingress | Installs NGINX and creates an AWS load balancer | 2-4 min |
 | 8. TLS | Creates a self-signed certificate for your hostname | Seconds |
@@ -343,7 +354,7 @@ To watch progress, open a **second** terminal:
 kubectl get pods -A
 ```
 
-Run it every few minutes. Pods move from `Pending` or `ContainerCreating` to `Running`. The scanner model pod in `f5-ai-sec-inference` is the slowest because it downloads a multi-gigabyte model.
+Run it every few minutes. Pods move from `Pending` or `ContainerCreating` to `Running`. The model pods in `f5-ai-sec-inference` are the slowest because each downloads a multi-gigabyte model.
 
 The namespaces you will see:
 
@@ -352,14 +363,77 @@ The namespaces you will see:
 | `f5-ai-sec` | The operator |
 | `cai-moderator` | The F5 AI Security UI and API, login service (Keycloak), and PostgreSQL database |
 | `prefect` | The background job system |
-| `f5-ai-sec-inference` | The GPU scanner model that powers the guardrails |
+| `f5-ai-sec-inference` | The GPU models: the Guardrails scanner on the `g5.4xlarge` node and the Red Team model on the `g6e.2xlarge` node |
 | `nginx-ingress` | NGINX Ingress Controller and its AWS load balancer |
 
-### 2.5 Point your hostname at the load balancer
+### 2.5 Allow your IP address in the security group
 
-Skip this step if your class uses Route 53. The script already created the DNS record.
+The script puts the platform behind an internet-facing AWS load balancer. Traffic passes straight through that load balancer to the cluster nodes, so the firewall that decides who gets in is the **security group on the nodes**. Add a rule that allows your own public IP address.
 
-Otherwise the hostname exists only on your laptop, so you add it to your hosts file.
+Depending on your AWS account's policies, these ports may start out open to everyone or closed to everyone. Add your rule in either case so that your access does not depend on a default.
+
+**Step 1 - collect the three values.**
+
+```bash
+source ~/f5-ai-lab/lab.env
+
+# Your public IP address, as AWS will see it
+MY_IP=$(curl -s https://checkip.amazonaws.com)
+
+# The security group attached to the cluster nodes
+SG_ID=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
+  --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+
+# The ports on the nodes that the load balancer forwards to (one for HTTP, one for HTTPS)
+NODE_PORTS=$(kubectl get svc -n nginx-ingress nginx-ingress-controller \
+  -o jsonpath='{.spec.ports[*].nodePort}')
+
+echo "My IP: $MY_IP   Security group: $SG_ID   Node ports: $NODE_PORTS"
+```
+
+All three must print a value. The node ports are two numbers between 30000 and 32767. They are not 80 and 443, because the load balancer forwards to these high ports on the nodes.
+
+**Step 2 - add the rules.**
+
+```bash
+for PORT in $NODE_PORTS; do
+  aws ec2 authorize-security-group-ingress --region "$AWS_REGION" --group-id "$SG_ID" \
+    --ip-permissions "IpProtocol=tcp,FromPort=$PORT,ToPort=$PORT,IpRanges=[{CidrIp=$MY_IP/32,Description=f5-ai-lab-access}]"
+done
+```
+
+Each command prints `"Return": true`. An `InvalidPermission.Duplicate` error means the rule already exists, which is fine.
+
+**Step 3 - confirm.**
+
+```bash
+aws ec2 describe-security-group-rules --region "$AWS_REGION" \
+  --filters "Name=group-id,Values=$SG_ID" \
+  --query "SecurityGroupRules[?CidrIpv4=='$MY_IP/32'].[FromPort,CidrIpv4,Description]" --output table
+```
+
+You should see one row per node port with your IP address.
+
+**Console alternative.** In the AWS console open **EC2 > Security Groups**, search for the group ID printed above (its name starts with `eks-cluster-sg-`), select **Inbound rules > Edit inbound rules > Add rule**, and add one **Custom TCP** rule per node port with **Source** set to **My IP**. Save.
+
+Things to know:
+
+- **Your IP can change.** Joining or leaving a VPN, or moving networks, changes it. If the UI stops responding later, rerun steps 1-3.
+- **Everything on your laptop shares this IP**, including the Docker containers in Section 4 and the app in Section 5, so one rule covers all of them.
+- **No cleanup is needed.** The security group is deleted with the cluster.
+
+**Optional - allow only your IP.** If these ports are open to `0.0.0.0/0` in your account, anyone on the internet can reach the login page, which still has its default password until 2.8. To close that, tell Kubernetes to restrict the load balancer to your address. Kubernetes then replaces its own open rule with one for your IP.
+
+```bash
+kubectl patch svc -n nginx-ingress nginx-ingress-controller --type merge \
+  -p '{"spec":{"loadBalancerSourceRanges":["'"$MY_IP"'/32"]}}'
+```
+
+If your IP changes later, rerun this command with the new value as well.
+
+### 2.6 Point your hostname at the load balancer
+
+The hostname exists only on your laptop, so you add it to your hosts file.
 
 1. Get the load balancer address and one of its IP addresses.
 
@@ -372,7 +446,7 @@ Otherwise the hostname exists only on your laptop, so you add it to your hosts f
 
    If the second command fails, the load balancer is still registering. Wait two minutes and retry.
 
-2. Save the IP address in `lab.env`. Section 4 needs it.
+2. Save the IP address in `lab.env`. Section 4 needs it for the containers.
 
    ```bash
    echo "export F5_LB_IP=\"PASTE-THE-IP\"" >> ~/f5-ai-lab/lab.env
@@ -387,7 +461,7 @@ Otherwise the hostname exists only on your laptop, so you add it to your hosts f
 
    On Windows, also add the same line to `C:\Windows\System32\drivers\etc\hosts` (edit as Administrator) so your Windows browser can resolve the name.
 
-### 2.6 Save the lab certificate
+### 2.7 Save the lab certificate
 
 The script created a self-signed certificate. Your browser will warn about it, which is expected. Command-line tools and the apps in Sections 4 and 5 need a copy of the certificate so they can trust it.
 
@@ -399,11 +473,11 @@ openssl x509 -in "$F5_CA" -noout -subject -enddate
 
 The `subject` line must show your hostname.
 
-### 2.7 Log in and change the password
+### 2.8 Log in and change the password
 
 1. Open `https://<your F5_HOST>` in a browser. Accept the certificate warning.
 2. Log in with username `admin` and password `pass`.
-3. Change the password. The F5 UI has no password page, so use the login service directly. Passwords are separate in each realm, so change it in both:
+3. Change the password now. Until you do, the platform is protected only by the security group. The F5 UI has no password page, so use the login service directly. Passwords are separate in each realm, so change it in both:
 
    ```text
    https://<your F5_HOST>/auth/realms/master/account/#/security/signingin
@@ -421,19 +495,21 @@ Expected:
 
 ```text
 EKS cluster:               ACTIVE, Kubernetes 1.35, region us-east-1
-Node:                      1/1 Ready, type g5.4xlarge
+Node:                      2/2 Ready, type ...
 Guardrails node group:     ACTIVE, 1 desired (1-1), type g5.4xlarge
+Red Team node group:       ACTIVE, 1 desired (1-1), type g6e.2xlarge
 Storage:                   ready (EBS CSI active, gp2 default)
 f5-ai-security-operator:   ready (1/1 replicas)
 cai-moderator:             ready (...)
 f5-ai-sec-inference:       ready (...)
+Red Team:                  enabled
 prefect:                   ready (...)
 nginx-ingress:             ready (1/1 replicas)
 ```
 
-Every component line must say `ready`.
+Every component line must say `ready`, both node groups must be `ACTIVE`, and `Red Team` must say `enabled`. The `Node` line shows the instance type of only one of the two nodes.
 
-> **If Route 53 is disabled**, `status` always prints `Public URL: not verified`, `DNS: disabled`, and a "Complete deploy: ... up" hint. That is normal. The script cannot test a name that exists only in your hosts file. Use the next check instead.
+> Because Route 53 is disabled, `status` always prints `Public URL: not verified`, `DNS: disabled`, and a "Complete deploy: ... up" hint. That is normal. The script cannot test a name that exists only in your hosts file. Use the next check instead.
 
 Then confirm the platform answers on your hostname with the saved certificate:
 
@@ -441,7 +517,18 @@ Then confirm the platform answers on your hostname with the saved certificate:
 curl -sS -o /dev/null -w 'HTTP %{http_code}\n' --cacert "$F5_CA" "https://$F5_HOST/"
 ```
 
-`HTTP 200` (or a `30x` redirect) with no certificate error means DNS, the load balancer, NGINX, TLS, and the F5 UI are all working. Finally, confirm you can log in to the UI with your **new** password.
+`HTTP 200` (or a `30x` redirect) with no certificate error means the security group rule, the hosts entry, the load balancer, NGINX, TLS, and the F5 UI are all working. If the command hangs and times out, the security group is not letting you in. Repeat 2.5.
+
+Confirm Red Team is deployed on its own node:
+
+```bash
+kubectl get nodes -L node.kubernetes.io/instance-type,eks.amazonaws.com/nodegroup
+kubectl get pods -n f5-ai-sec-inference -o wide
+```
+
+The first command lists two nodes, one per node group. In the second, every pod is `Running` and the `NODE` column shows that the model pods are spread across both nodes.
+
+Finally, log in to the UI with your **new** password and confirm the menu shows **AI Red Team** as well as the Guardrails items. Remediate works from Red Team results, so there is nothing more to check for it until a Red Team campaign has run in a later lab.
 
 ---
 
@@ -590,7 +677,7 @@ What each option does:
 | `OPENAI_API_KEY` | The F5 project token. It selects the project and its guardrails. |
 | `OPENAI_MODEL_LIST` | Hides the default OpenAI models and shows only the Bedrock model, with a readable label |
 | `NODE_EXTRA_CA_CERTS` and `-v` | Makes the container trust the lab's self-signed certificate |
-| `--add-host` | Lets the container resolve your lab hostname. Added only if you set `F5_LB_IP` in 2.5. |
+| `--add-host` | Lets the container resolve your lab hostname, using `F5_LB_IP` from 2.6 |
 
 ### 4.2 Select the model
 
@@ -790,7 +877,7 @@ curl -sS http://127.0.0.1:8021/api/orchestrator/run \
 
 ## Cleanup
 
-The GPU node bills by the hour. Tear down as soon as you finish.
+Both GPU nodes bill by the hour. Tear down as soon as you finish.
 
 ```bash
 # 1. Stop the multi-agent app: press Ctrl+C in terminals A and B.
@@ -798,7 +885,7 @@ The GPU node bills by the hour. Tear down as soon as you finish.
 # 2. Remove the LobeChat containers
 docker rm -f lobe-protected lobe-baseline
 
-# 3. Delete the cluster and everything it created (10-15 minutes)
+# 3. Delete the cluster and everything it created, including the security group rules (10-20 minutes)
 cd ~/f5-ai-lab/f5-guardrail-cm
 ./scripts/guardrails-poc.sh down --yes
 
@@ -823,13 +910,16 @@ Then:
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `preflight` fails on Harbor login | Wrong credentials or extra blank characters | `harbor.txt` must have the username on line 1 and the password on line 2 |
-| `up` fails creating the node group with a capacity or quota error | GPU quota too low or no `g5.4xlarge` capacity in that zone | Raise the quota (1.6) or rerun `up` |
+| `up` fails creating a node group with a capacity or quota error | GPU quota below 24 vCPUs, or no `g5.4xlarge` / `g6e.2xlarge` capacity in that zone | Raise the quota (1.6) or rerun `up` |
+| `status` shows `Red Team: disabled` or no Red Team node group | `ENABLE_RED_TEAM` is still `false` in `guardrails-poc.env` | Set it to `true` and rerun `up`. It adds the node group to the existing cluster. |
+| A Red Team model pod stays `Pending` | The `g6e.2xlarge` node is missing or not `Ready` | `kubectl get nodes`, then `kubectl describe pod <name> -n f5-ai-sec-inference` and read **Events** |
 | `up` stops or your terminal closes | Any | Run `./scripts/guardrails-poc.sh up` again. It resumes. |
 | Pods in `ImagePullBackOff` | Harbor credentials wrong or expired | Fix `harbor.txt`, rerun `up` |
 | `f5-ai-sec-inference` pod `Pending` for more than 20 minutes | GPU not available to the pod | `kubectl describe pod <name> -n f5-ai-sec-inference` and read **Events** |
 | `up` exits silently right after the ingress install | Local `openssl` is too old for the `-addext` option | Install a current OpenSSL (1.1.1 or newer) and rerun `up` |
-| Browser cannot reach the UI | Hosts entry missing or load balancer IP changed | Repeat 2.5 |
-| `curl` reports a certificate error | Wrong hostname or stale certificate file | Repeat 2.6. The certificate is valid only for the exact `HOSTNAME`. |
+| Browser or `curl` hangs, then times out | Your IP is not allowed in the node security group, or your IP changed (VPN, new network) | Repeat 2.5 |
+| Browser says the site cannot be found | Hosts entry missing or load balancer IP changed | Repeat 2.6 |
+| `curl` reports a certificate error | Wrong hostname or stale certificate file | Repeat 2.7. The certificate is valid only for the exact `HOSTNAME`. |
 
 Detailed views when you need them:
 
@@ -855,7 +945,7 @@ kubectl logs -n f5-ai-sec-inference deploy/f5-ai-sec-inference --tail=100
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Every message errors immediately | Container cannot resolve or trust the F5 hostname | `docker logs lobe-protected`. Check `--add-host` (needs `F5_LB_IP`) and the certificate mount. |
+| Every message errors immediately | Container cannot resolve, reach, or trust the F5 hostname | `docker logs lobe-protected`. Check `--add-host` (needs `F5_LB_IP`), the security group rule (2.5), and the certificate mount. |
 | Certificate errors persist in `docker logs` | The image ignores the extra CA | For this lab only, recreate the container adding `-e NODE_TLS_REJECT_UNAUTHORIZED=0`. Never do this outside a lab. |
 | Model list is empty | `OPENAI_MODEL_LIST` not applied | Recreate the container. Settings from an older container can persist in the browser, so try a private window. |
 | Replies are empty | Streaming is not passing through cleanly | Confirm with the `ask` helper that non-streaming works, then report to your instructor |
@@ -867,7 +957,7 @@ kubectl logs -n f5-ai-sec-inference deploy/f5-ai-sec-inference --tail=100
 | --- | --- | --- |
 | `ModuleNotFoundError: No module named 'dotenv'` | `python-dotenv` not installed | `pip install python-dotenv` |
 | Startup error mentioning `CONNECTION-NAME` | `CALYPSOAI_BASE_URL` not loaded | Check the `--env-file` path |
-| Run returns `{"detail":"Connection error."}` | Hostname not resolving or certificate not trusted | Check `/etc/hosts` and `SSL_CERT_FILE` in the env file. Open a fresh terminal so no old `SSL_CERT_FILE` overrides it. |
+| Run returns `{"detail":"Connection error."}` | Hostname not resolving, your IP not allowed, or certificate not trusted | Check `/etc/hosts`, the security group rule (2.5), and `SSL_CERT_FILE` in the env file. Open a fresh terminal so no old `SSL_CERT_FILE` overrides it. |
 | Happy path fails with a model or tool error | The model or connection does not support forced tool calls or JSON output | See Appendix B, item 2 |
 | App works but nothing appears in F5 logs | App is in mock mode | Mock mode only activates when no token is set. Check the env file. |
 
@@ -894,7 +984,7 @@ Reference: <https://docs.aisecurity.f5.com/onboarding/connections/connect-model-
 
 ### What was verified while writing this guide
 
-- **Automation behavior** (Section 2) was taken from `scripts/guardrails-poc.sh` and `config/guardrails-poc.env.example` in this repository: actions, stages, namespaces, secret file formats, certificate secret name, ingress routes, and `status` output including the Route 53-disabled wording.
+- **Automation behavior** (Section 2) was taken from `scripts/guardrails-poc.sh` and `config/guardrails-poc.env.example` in this repository: actions, stages, namespaces, secret file formats, certificate secret name, ingress routes, the Red Team node group and model placement, and `status` output including the Route 53-disabled wording. This repository's script and configuration are identical to the original at <https://github.com/yalmashad/f5-guardrail> (commit `9bb210f`).
 - **Multi-agent app behavior** (Section 5) was run locally from `f5devcentral/f5-ai-sec-multi-agent-system-app` on Python 3.13: mock mode, `/health`, scenario endpoints, the `python-dotenv` requirement for `--env-file`, and trust of a self-signed certificate through `SSL_CERT_FILE`. A local HTTPS stub confirmed the app calls `<base URL>/chat/completions`, sends `OPENAI_MODEL` as the model, and uses forced `tool_choice` and `response_format: json_object`.
 
 ### What must be rehearsed on a live deployment before class
@@ -907,14 +997,18 @@ None of the following could be tested without a licensed cluster. Run the whole 
 4. **LobeChat (Section 4).** Confirm the pinned tag `lobehub/lobe-chat:1.143.3` pulls, that `NODE_EXTRA_CA_CERTS` makes it trust the lab certificate, and that streamed replies pass through F5 AI Security. `lobehub/lobe-chat` is the v1 single-container image. The v2 image (`lobehub/lobehub`) needs PostgreSQL, Redis, and object storage and is not suitable for a short lab.
 5. **Leak scenario outcome (Check 2).** Whether the baseline answer contains the client data depends on the model following the injected text. Confirm it leaks on baseline and is stopped on protected with your guardrail set. If baseline does not leak, the lab still works as a logging comparison, but the contrast is weaker.
 6. **Operator version.** `guardrails-poc.env.example` pins `OPERATOR_CHART_VERSION="1.10.0"`. Pin the version you rehearse.
+7. **Security group step (2.5).** The script installs NGINX behind a Network Load Balancer with instance targets and no AWS Load Balancer Controller, so client traffic reaches the nodes on the service's node ports and is filtered by the node security group. The guide assumes eksctl-managed node groups use the EKS cluster security group. Confirm on a live cluster that (a) the cluster security group is the one attached to the nodes, (b) a manually added rule survives, and (c) the optional `loadBalancerSourceRanges` patch replaces the open rule as described. If your AWS account strips `0.0.0.0/0` rules automatically, note that for students so the initial timeout is expected.
+8. **Red Team placement and UI (Validate Section 2).** The pod-spread check and the **AI Red Team** menu label are inferred from the script's node selectors and the public documentation. Confirm both, and confirm the license enables Remediate.
+9. **Deployment time with Red Team.** The 35-60 minute figure is an estimate. The repository documents 25-45 minutes for Guardrails alone.
 
 ### Class logistics
 
-- **Shared AWS account:** give each student a unique `CLUSTER_NAME`, and confirm the G and VT quota covers 16 vCPUs per student.
-- **DNS:** a Route 53 hosted zone with one hostname per student removes the hosts-file steps (2.5) and the `--add-host` option (4.1).
-- **Pre-building:** `up` reuses an existing cluster. To save 15-20 minutes of class time, create the clusters beforehand with the `eksctl` command in the README's manual reference, then have students run `up`.
-- **Sizing:** this PoC runs the platform services on the GPU node. That is fine for a lab and is not a production sizing.
-- **Red Team:** out of scope for this guide. Enabling it adds a `g6e.2xlarge` node and needs a license that covers it.
+- **Shared AWS account:** give each student a unique `CLUSTER_NAME`, and confirm the G and VT quota covers 24 vCPUs per student.
+- **DNS:** the guide uses a local hosts file. The script also supports Route 53 (`ROUTE53_ENABLED="true"`) if you later want real DNS names.
+- **Pre-building:** `up` reuses an existing cluster and node groups. To save 20-30 minutes of class time, create both beforehand with the `eksctl` commands in the README's manual reference, then have students run `up`.
+- **Sizing:** this PoC runs the platform services on the GPU nodes. That is fine for a lab and is not a production sizing.
+- **Red Team and Remediate:** deployed and verified in Section 2 but not exercised. They are left running as the starting point for follow-on labs (Red Team campaigns against the Bedrock connection and the multi-agent app, then Remediate to turn findings into guardrails).
+- **Missing `.env.example`:** the multi-agent app's README refers to a `.env.example` that is not in `f5devcentral/f5-ai-sec-multi-agent-system-app`. It is not in the original automation repository either. Step 5.3 generates the env files instead.
 
 ### Source documentation
 
@@ -922,5 +1016,6 @@ None of the following could be tested without a licensed cluster. Run the whole 
 - F5 AI Security, OpenAI compatibility: <https://docs.aisecurity.f5.com/api-docs/openai-compatibility.html>
 - F5 AI Security, first steps (tokens): <https://docs.aisecurity.f5.com/api-docs/first-steps.html>
 - F5 AI Security, create a project: <https://docs.aisecurity.f5.com/use-cases/create-project.html>
+- F5 AI Security, install with Helm (license and Remediate note): <https://docs.aisecurity.f5.com/get-started/get-started-helm.html>
 - Amazon Bedrock, Chat Completions API: <https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions-mantle.html>
 - LobeChat, Docker deployment: <https://chat-docs.lobehub.com/en/self-hosting/platform/docker>
