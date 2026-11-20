@@ -466,6 +466,6 @@ Access-control problems:
 | The UI or `curl` hangs and times out | Your public IP is not in the allowed list, often after a VPN or network change | `./scripts/guardrails-poc.sh access`, then wait about a minute |
 | `status` shows `Ingress access: failed (open to every address ...)` | The service has no source restriction, for example a deployment made before this feature | `./scripts/guardrails-poc.sh access` |
 | `up` stops with "Could not reach the login service" | Platform pods were not ready | Check `kubectl get pods -n cai-moderator`, then rerun `up` |
-| `up` stops with "Could not sign in to replace the admin password" | The password was changed by hand and the file does not match | Put the current password on the first line of `.secrets/admin-password`, then rerun `up` |
+| `up` stops with "The initial admin password is still in place because the login service refused the change" | The built-in `admin` user may not change passwords through the admin interface | Set `ALLOW_DEFAULT_PASSWORD="true"`, rerun `up`, change the password at first login, then set it back to `"false"`. The load balancer stays restricted to the allowed addresses. |
 | `status` shows `Admin password: unknown` | `https://<HOSTNAME>` does not resolve or is not reachable from this machine | Fix DNS or the allowed list, then rerun `status` |
 | Preflight cannot detect your public IP | `checkip.amazonaws.com` is blocked | Set `ALLOWED_SOURCE_CIDRS` to your address |

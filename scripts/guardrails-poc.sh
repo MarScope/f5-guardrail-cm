@@ -1332,6 +1332,14 @@ if base is None:
     sys.exit(75)
 
 
+def describe(body):
+    try:
+        data = json.loads(body)
+        return "%s: %s" % (data.get("error", "error"), data.get("error_description", ""))
+    except Exception:
+        return "no details"
+
+
 def token(realm, password):
     status, body = call(
         "POST",
@@ -1341,46 +1349,22 @@ def token(realm, password):
     )
     if status == 200:
         try:
-            return status, json.loads(body)["access_token"]
+            return status, json.loads(body)["access_token"], ""
         except Exception:
-            return 0, None
-    return status, None
+            return 0, None, "unreadable reply"
+    return status, None, describe(body)
 
 
-def admin_token():
-    status, value = token(admin_realm, new_password)
-    if status == 200:
-        return value, "new"
-    status, value = token(admin_realm, default_password)
-    if status == 200:
-        return value, "initial"
-    if status == 0:
-        sys.exit(75)
-    say("Cannot sign in to realm %s as %s with the new or the initial password (HTTP %s)." % (admin_realm, user, status))
-    sys.exit(3)
-
-
-_, which = admin_token()
-if which == "new":
-    say("realm %s already uses the new password" % admin_realm)
-
-failures = 0
-for realm in realms:
-    access_token, _ = admin_token()
+def reset_with(realm, access_token):
+    """Replace the user's password in realm using access_token. Returns (done, reason)."""
     auth = {"Authorization": "Bearer " + access_token}
     query = urllib.parse.urlencode({"username": user, "exact": "true"})
     status, body = call("GET", base + "/admin/realms/" + realm + "/users?" + query, headers=auth)
-    if status == 404:
-        say("realm %s: not found, skipped" % realm)
-        continue
     if status != 200:
-        say("realm %s: could not look up user %s (HTTP %s)" % (realm, user, status))
-        failures += 1
-        continue
+        return False, "user lookup HTTP %s" % status
     matches = [u for u in json.loads(body) if str(u.get("username", "")).lower() == user.lower()]
     if not matches:
-        say("realm %s: no user named %s, nothing to change" % (realm, user))
-        continue
+        return False, "no user named %s" % user
     status, body = call(
         "PUT",
         base + "/admin/realms/" + realm + "/users/" + matches[0]["id"] + "/reset-password",
@@ -1388,9 +1372,53 @@ for realm in realms:
         headers=auth,
     )
     if status in (200, 204):
-        say("realm %s: password replaced" % realm)
-    else:
-        say("realm %s: password change was refused (HTTP %s) %s" % (realm, status, body[:200].decode("utf-8", "replace")))
+        return True, ""
+    return False, "password change HTTP %s %s" % (status, body[:200].decode("utf-8", "replace"))
+
+
+def master_token():
+    # The admin realm's admin can manage every realm, when its password is known.
+    for password in (new_password, default_password):
+        status, value, _ = token(admin_realm, password)
+        if status == 200:
+            return value
+    return None
+
+
+failures = 0
+replaced = 0
+already_new = 0
+for realm in realms:
+    new_status, _, _ = token(realm, new_password)
+    old_status, old_token, old_error = token(realm, default_password)
+    if new_status == 0 and old_status == 0:
+        sys.exit(75)
+    if old_status != 200:
+        if new_status == 200:
+            say("realm %s: already uses the new password" % realm)
+            already_new += 1
+        else:
+            say("realm %s: the initial password is not accepted here (HTTP %s, %s); nothing to replace" % (realm, old_status, old_error))
+        continue
+
+    # The initial password works in this realm. Replace it, first with the
+    # user's own sign-in to this realm, then with the admin realm's admin.
+    attempts = [("its own sign-in", old_token)]
+    if realm != admin_realm:
+        other = master_token()
+        if other:
+            attempts.append(("the %s realm admin" % admin_realm, other))
+    reasons = []
+    done = False
+    for label, access_token in attempts:
+        done, reason = reset_with(realm, access_token)
+        if done:
+            say("realm %s: password replaced (using %s)" % (realm, label))
+            replaced += 1
+            break
+        reasons.append("%s: %s" % (label, reason))
+    if not done:
+        say("realm %s: could not replace the initial password. %s" % (realm, "; ".join(reasons)))
         failures += 1
 
 if failures:
@@ -1401,6 +1429,8 @@ if still_open:
     say("The initial password is still accepted in: %s" % " ".join(still_open))
     sys.exit(4)
 say("verified: the initial password is rejected in: %s" % " ".join(realms))
+if replaced == 0 and already_new == 0:
+    sys.exit(10)
 PY
     kill "$pf_pid" >/dev/null 2>&1 || true
     wait "$pf_pid" 2>/dev/null || true
@@ -1413,9 +1443,10 @@ PY
 
   case "$rc" in
     0) log "Initial admin password replaced. The current password is in $(resolve_repo_path "$ADMIN_PASSWORD_FILE") unless GUARDRAILS_ADMIN_PASSWORD was used." ;;
+    10) log "No realm accepted the initial admin password, so nothing was changed. The password in $(resolve_repo_path "$ADMIN_PASSWORD_FILE") is not in use; sign in with the password you set earlier." ;;
     75) password_rotation_failed "Could not reach the login service at svc/$KEYCLOAK_SERVICE:$KEYCLOAK_SERVICE_PORT in namespace $MODERATOR_NAMESPACE to replace the initial admin password." ;;
-    3) password_rotation_failed "Could not sign in to replace the admin password. If you already changed it by hand, put the current password on the first line of $ADMIN_PASSWORD_FILE." ;;
     4) password_rotation_failed "The initial admin password is still accepted in at least one realm after the change." ;;
+    5) password_rotation_failed "The initial admin password is still in place because the login service refused the change. See the messages above." ;;
     *) password_rotation_failed "Replacing the initial admin password failed (exit code $rc). See the messages above." ;;
   esac
 }
