@@ -13,10 +13,12 @@ The PoC uses:
 - F5 NGINX Ingress Controller for NGINX Open Source
 - Optional Route 53 DNS management
 - Self-signed TLS for lab access
+- Ingress load balancer restricted to your source addresses
+- Initial admin password replaced during deployment, before the ingress exists
 
 For a step-by-step, instructor-led walkthrough (deploy, connect Amazon Bedrock, test with LobeChat and a multi-agent app), see the [AI Security - EKS Lab Guide](docs/ai-security-eks-lab-guide.md).
 
-Route 53 is optional. If you do not use Route 53, the script still deploys the environment and prints the ingress load balancer hostname so you can create DNS manually with another provider.
+Route 53 is optional. If you do not use Route 53, the script still deploys the environment and `status` shows the ingress load balancer hostname. Point your hostname at it with another DNS provider or, for a single machine, a local hosts-file entry.
 
 ## Architecture
 
@@ -28,10 +30,11 @@ Browser
 DNS record
   |
   v
-AWS Network Load Balancer
+AWS Network Load Balancer  (internet-facing)
   |
+  | node security group: only ALLOWED_SOURCE_CIDRS
   v
-NGINX Ingress Controller
+NGINX Ingress Controller  (TLS, self-signed certificate)
   |
   +-- /auth -> cai-moderator:8080  (Keycloak)
   |
@@ -45,7 +48,7 @@ NGINX Ingress Controller
 | `f5-ai-sec` | F5 AI Security Operator |
 | `cai-moderator` | Guardrails UI/API, Keycloak auth, PostgreSQL |
 | `prefect` | Prefect server, worker, workflow registration |
-| `f5-ai-sec-inference` | Guardrails inference service and scanner model |
+| `f5-ai-sec-inference` | Inference service, Guardrails scanner model, and the Red Team model when enabled |
 | `nginx-ingress` | F5 NGINX Ingress Controller and AWS load balancer |
 
 ## Sizing Note
@@ -79,8 +82,9 @@ Required local tools:
 
 Required inputs:
 
-- AWS CLI credentials with permissions for EKS, EC2, IAM, CloudFormation, ELB, EBS, and Route 53
+- AWS CLI credentials with permissions for EKS, EC2, IAM, CloudFormation, ELB, and EBS, plus Route 53 if `ROUTE53_ENABLED=true`
 - Route 53 hosted zone for the selected hostname, only if `ROUTE53_ENABLED=true`
+- Outbound HTTPS to `checkip.amazonaws.com` so the script can detect your public IP, unless you list addresses in `ALLOWED_SOURCE_CIDRS` yourself
 - Harbor registry credentials for `harbor.calypsoai.app`
 - F5 AI Security license string
 - LLM provider credentials for post-install app configuration
@@ -97,7 +101,12 @@ Run preflight:
 ./scripts/guardrails-poc.sh preflight
 ```
 
-The preflight check validates local tools, AWS identity, region, optional Route 53 settings, GPU instance availability, GPU quota visibility, Harbor login, license input, and `eksctl` cluster configuration.
+The preflight check validates local tools, secret inputs, the source addresses the load balancer will accept, the admin password plan, AWS identity, region, optional Route 53 settings, GPU instance availability, GPU quota visibility, Harbor login, license input, and `eksctl` cluster configuration.
+
+Two limits to know about:
+
+- The GPU quota check only reports the quota value. It does not compare it with what the node groups need (16 vCPUs for Guardrails, 8 more for Red Team).
+- When `ROUTE53_HOSTED_ZONE_ID` is set, preflight accepts it as written and does not confirm the zone exists in your account. A wrong ID fails later, during `up`.
 
 ## Script Deployment
 
@@ -107,8 +116,19 @@ Use the script for normal PoC lifecycle operations.
 ./scripts/guardrails-poc.sh preflight
 ./scripts/guardrails-poc.sh up
 ./scripts/guardrails-poc.sh status
+./scripts/guardrails-poc.sh access
 ./scripts/guardrails-poc.sh down --yes
 ```
+
+| Action | Purpose |
+| --- | --- |
+| `preflight` | Check tools, inputs, and AWS access. Changes nothing. |
+| `up` | Deploy, or continue a partial deployment |
+| `status` | Print a health summary |
+| `access` | Re-apply the allowed source addresses, for example after your IP changes |
+| `down` | Delete the environment. Asks you to type `DELETE` unless `--yes` is given. |
+
+Options: `--config FILE` uses a config file other than `config/guardrails-poc.env`. `--dry-run` prints the commands `up`, `down`, `status`, or `access` would run without changing anything. If `config/guardrails-poc.env` does not exist, the script falls back to the example file.
 
 The script is idempotent. If deployment stops partway through, rerun `up`; it reuses existing AWS and Kubernetes resources and continues from the current state.
 
@@ -120,7 +140,7 @@ Copy the example config:
 cp config/guardrails-poc.env.example config/guardrails-poc.env
 ```
 
-Edit `config/guardrails-poc.env` if you need to change region, cluster name, hostname, hosted zone, node groups, Red Team, Route 53, ingress, or secret file paths.
+Edit `config/guardrails-poc.env` if you need to change region, cluster name, hostname, hosted zone, node groups, Red Team, Route 53, ingress, access control, or secret file paths.
 
 Default secret paths:
 
@@ -129,14 +149,25 @@ HARBOR_CREDENTIALS_FILE="config/harbor.txt"
 F5_LICENSE_FILE="config/license.txt"
 ```
 
-Important feature toggles:
+File formats:
+
+- `config/harbor.txt`: Harbor username on the first line, password on the second.
+- `config/license.txt`: the license string and nothing else.
+
+Both files are ignored by git. Instead of files you can export `HARBOR_USERNAME` and `HARBOR_PASSWORD`, and `F5_LICENSE_STRING`. Environment variables take precedence over the files.
+
+Important feature toggles and their defaults in the example config:
 
 ```bash
 ROUTE53_ENABLED="false"
 ENABLE_RED_TEAM="false"
+RESTRICT_INGRESS_SOURCE="true"
+ROTATE_DEFAULT_PASSWORD="true"
 ```
 
-When Route 53 is disabled, the script still creates the ingress load balancer and prints its hostname. You can then create DNS manually with any DNS provider. Set `ROUTE53_ENABLED=true` to let the script honor `ROUTE53_ZONE_NAME` and `ROUTE53_HOSTED_ZONE_ID`.
+When Route 53 is disabled, the script still creates the ingress load balancer and `status` shows its hostname. You can then create DNS manually with any DNS provider or use a hosts-file entry.
+
+Set `ROUTE53_ENABLED=true` to let the script create a CNAME for `HOSTNAME` in your hosted zone. Set `ROUTE53_ZONE_NAME` and `ROUTE53_HOSTED_ZONE_ID` to your own zone. The example file contains the zone name and ID of the original author's zone, which will not work in your account. If you leave `ROUTE53_HOSTED_ZONE_ID` empty, the script looks the zone up by name.
 
 When Red Team is enabled, make sure the license covers Red Team. Default node groups:
 
@@ -156,13 +187,13 @@ To verify or update to the latest F5 AI Security Operator version in Harbor befo
 
 ```bash
 # Log in to Harbor
-sed -n '1p' config/harbor.txt | helm registry login harbor.calypsoai.app --username $(sed -n '1p' config/harbor.txt) --password-stdin < <(sed -n '2p' config/harbor.txt)
+sed -n '2p' config/harbor.txt | helm registry login harbor.calypsoai.app --username "$(sed -n '1p' config/harbor.txt)" --password-stdin
 
 # Check latest chart version
 helm show chart oci://harbor.calypsoai.app/calypsoai/f5-ai-security-operator-helm
 ```
 
-Update `OPERATOR_CHART_VERSION` in `config/guardrails-poc.env` with the desired version tag.
+Update `OPERATOR_CHART_VERSION` in `config/guardrails-poc.env` with the desired version tag. The example config pins `1.10.0`. If the setting is missing altogether, the script falls back to `1.4.1`.
 
 ### Deploy
 
@@ -200,11 +231,15 @@ Storage:                   ready (EBS CSI active, gp2 default)
 f5-ai-security-operator:   ready (1/1 replicas)
 cai-moderator:             ready (2/2 pods)
 f5-ai-sec-inference:       ready (2/2 pods)
-prefect:                   ready (3/3 pods)
 Red Team:                  disabled
+prefect:                   ready (3/3 pods)
 nginx-ingress:             ready (1/1 replicas)
 EBS leftovers:             none found
 ```
+
+The summary is followed by an **Access** block (UI URL, username, where the password is stored) and suggested next actions.
+
+With `ROUTE53_ENABLED=false` the first two lines read `Public URL: not verified (DNS not managed by script)` and `DNS: disabled ...`, and the next-actions hint still suggests running `up`. That is expected: the script does not test a hostname it did not create. With `ENABLE_RED_TEAM=true` a `Red Team node group` line appears and `Node` shows `2/2 Ready`.
 
 ### Stop and Delete
 
@@ -212,15 +247,19 @@ EBS leftovers:             none found
 ./scripts/guardrails-poc.sh down --yes
 ```
 
-This deletes Route 53 records when enabled, the EKS cluster, GPU node group, load balancer, EBS volumes created through the cluster, available leftover cluster-owned EBS volumes, and `eksctl` CloudFormation stacks.
+This deletes the Route 53 record when enabled, the EKS cluster, GPU node groups, load balancer, EBS volumes created through the cluster, available leftover cluster-owned EBS volumes, and `eksctl` CloudFormation stacks.
+
+It does not delete local files. `.secrets/admin-password` and `.secrets/postgres-password` stay on your machine and are reused by the next `up`. Delete the `.secrets/` folder yourself when you are finished with the PoC.
 
 ## Access Control and First Login
 
-The platform ships with published initial credentials (`admin` / `pass`) and the ingress is an internet-facing load balancer. `up` closes both gaps before anything is reachable from outside the cluster.
+The platform ships with published initial credentials (`admin` / `pass`) and the ingress is an internet-facing load balancer. `up` addresses both before anything is reachable from outside the cluster.
+
+> **Verification status:** these two safeguards were tested against local stand-ins (a stub of the Keycloak endpoints, and fake `kubectl` and `helm` commands). They have not yet been run against a live cluster. On your first deployment, confirm both with `status` and the checks below.
 
 ### Source address restriction
 
-The ingress controller service is created with `loadBalancerSourceRanges`, so the load balancer only ever accepts the addresses you allow.
+The ingress controller service is created with `loadBalancerSourceRanges` set from the first install, so the load balancer is not created open to every address. Kubernetes enforces the list by writing inbound rules for the service's node ports into the security group on the cluster nodes.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -233,11 +272,21 @@ When your public IP changes (VPN, different network), re-apply the list without 
 ./scripts/guardrails-poc.sh access
 ```
 
-`status` shows the current list and whether this machine is in it.
+`status` shows the current list and whether this machine is in it. `auto` is resolved each time `up` or `access` runs, so rerunning either from a new address replaces the old one.
+
+To check what AWS enforces, list the inbound rules of the cluster security group. No rule for the ingress node ports should have `0.0.0.0/0` as its source:
+
+```bash
+SG_ID=$(aws eks describe-cluster --name f5-guardrails-poc --region us-east-1 \
+  --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+aws ec2 describe-security-group-rules --region us-east-1 \
+  --filters "Name=group-id,Values=$SG_ID" \
+  --query 'SecurityGroupRules[?IsEgress==`false`].[FromPort,ToPort,CidrIpv4,Description]' --output table
+```
 
 ### Initial password replacement
 
-After the platform pods are up and **before** the ingress is installed, the script reaches the embedded Keycloak through `kubectl port-forward` and replaces the password of `admin` in every realm in `GUARDRAILS_AUTH_REALMS`. It then checks that the initial password is rejected.
+After the platform pods are up and **before** the ingress is installed, the script reaches the embedded Keycloak through `kubectl port-forward` to `svc/cai-moderator` port `8080`. It signs in to the `master` realm with the initial credentials, replaces the password of `admin` in the `master` realm and in every realm in `GUARDRAILS_AUTH_REALMS`, and then checks that the initial password is rejected. A realm that does not exist is skipped.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -252,7 +301,9 @@ Read the password:
 cat .secrets/admin-password
 ```
 
-Then log in at `https://<HOSTNAME>` as `admin`.
+Then log in at `https://<HOSTNAME>` as `admin`. The file is not written when `GUARDRAILS_ADMIN_PASSWORD` is used.
+
+If the password was already changed by hand on an existing deployment, put the current password on the first line of `.secrets/admin-password` before rerunning `up`. Otherwise the script cannot sign in and stops.
 
 The Guardrails UI account page does not expose password management. To choose your own password, use the embedded Keycloak account console for each realm, then put the new password on the first line of `.secrets/admin-password` so later `up` runs can still sign in:
 
@@ -338,7 +389,7 @@ helm registry login harbor.calypsoai.app
 
 helm upgrade --install f5-ai-security-operator \
   oci://harbor.calypsoai.app/calypsoai/f5-ai-security-operator-helm \
-  --version 1.4.1 \
+  --version 1.10.0 \
   -n f5-ai-sec
 ```
 
@@ -354,10 +405,11 @@ Apply a `SecurityOperator` custom resource with:
 
 ### 4. Complete Supporting Services
 
-The first manual deployment required these fixes, which are now automated by the script:
+The first manual deployment required these steps, which are now automated by the script:
 
 - Wait for Prefect API health before recreating the workflow registration job.
-- Install F5 NGINX Ingress Controller with an internet-facing AWS NLB.
+- Replace the initial `admin` password in Keycloak before any ingress exists (see [Access Control and First Login](#access-control-and-first-login)).
+- Install F5 NGINX Ingress Controller with an internet-facing AWS NLB, with `controller.service.loadBalancerSourceRanges` set to the addresses that may connect.
 - Create a self-signed TLS secret for `guardrails.f5demo.io`.
 - Create an ingress routing `/auth` to port `8080` and `/` to port `5500` on `cai-moderator`.
 - Optionally create a Route 53 CNAME from `guardrails.f5demo.io` to the ingress load balancer.
@@ -382,4 +434,15 @@ kubectl logs -n f5-ai-sec-inference deploy/f5-ai-sec-inference --tail=100
 kubectl logs -n prefect deploy/prefect-server --tail=100
 ```
 
-If Route 53 is enabled and the public URL is not reachable immediately after the record is updated, wait a few minutes for DNS propagation and local resolver cache refresh. If Route 53 is disabled, create a DNS record manually that points your hostname to the ingress load balancer.
+If Route 53 is enabled and the public URL is not reachable immediately after the record is updated, wait a few minutes for DNS propagation and local resolver cache refresh. If Route 53 is disabled, create a DNS record manually, or a hosts-file entry, that points your hostname to the ingress load balancer.
+
+Access-control problems:
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| The UI or `curl` hangs and times out | Your public IP is not in the allowed list, often after a VPN or network change | `./scripts/guardrails-poc.sh access`, then wait about a minute |
+| `status` shows `Ingress access: failed (open to every address ...)` | The service has no source restriction, for example a deployment made before this feature | `./scripts/guardrails-poc.sh access` |
+| `up` stops with "Could not reach the login service" | Platform pods were not ready | Check `kubectl get pods -n cai-moderator`, then rerun `up` |
+| `up` stops with "Could not sign in to replace the admin password" | The password was changed by hand and the file does not match | Put the current password on the first line of `.secrets/admin-password`, then rerun `up` |
+| `status` shows `Admin password: unknown` | `https://<HOSTNAME>` does not resolve or is not reachable from this machine | Fix DNS or the allowed list, then rerun `status` |
+| Preflight cannot detect your public IP | `checkip.amazonaws.com` is blocked | Set `ALLOWED_SOURCE_CIDRS` to your address |
