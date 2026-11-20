@@ -636,6 +636,62 @@ It should print a short greeting from the model.
 
 You do not create the API key yet. A short-term key lasts 12 hours at most and often much less, so you create it at the start of Section 3, right before it is needed.
 
+#### Optional - use a different Bedrock model
+
+The lab's default model is `openai.gpt-oss-120b-1:0`. Your instructor may ask you to use another one. To see what you are currently set to:
+
+```bash
+echo "Model: $BEDROCK_MODEL   Region: $BEDROCK_REGION"
+```
+
+**What a replacement model must support.**
+
+| Requirement | Why | Where to check |
+| --- | --- | --- |
+| The **Chat Completions** API | Every client in this lab, and F5 AI Security itself, speaks chat completions | [API compatibility by models](https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html) |
+| Hosted on the **`bedrock-runtime`** endpoint | That is the endpoint this guide's URLs point at | [Endpoint availability by models](https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html) |
+| **Tool calling** (function calling) | The multi-agent app in Section 5 forces tool calls and asks for JSON output | The model's card |
+| Available in your region, to your role | Otherwise calls are refused | The check at the end of this step |
+
+**Where to find model names.** Bedrock calls the name a **model ID**. It looks like `provider.model-name-version`.
+
+- **AWS documentation:** [Models at a glance](https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html) lists every model. Select one to open its card. The **Programmatic access** part of the card shows the model ID and the endpoint URLs.
+- **AWS console:** open **Amazon Bedrock**, select **Model catalog** in the left menu, and select a model. Its page shows the model ID.
+- **Command line:** list the text models offered in your region:
+
+  ```bash
+  aws bedrock list-foundation-models --region "$BEDROCK_REGION" --by-output-modality TEXT \
+    --query 'modelSummaries[].[modelId,providerName,modelName]' --output table
+  ```
+
+  This shows what exists in the region. It does not tell you whether a model supports chat completions or tool calling, so still check the two documentation pages in the table above.
+
+Some models are called through an **inference profile**, whose ID has a region-group prefix such as `us.` in front of the model ID. If a model's card shows an ID in that form, use it exactly as shown.
+
+**Set the model and test it.** Replace the example ID with the one you chose:
+
+```bash
+labvar BEDROCK_MODEL openai.gpt-oss-20b-1:0
+
+aws bedrock-runtime converse \
+  --region "$BEDROCK_REGION" \
+  --model-id "$BEDROCK_MODEL" \
+  --messages '[{"role":"user","content":[{"text":"Say hello in five words."}]}]' \
+  --query 'output.message.content[].text' --output text
+```
+
+A greeting means your role can call the new model. Step 3.1 then tests it through the chat completions endpoint before anything is connected to it.
+
+**If you change the model later in the lab,** run `labvar BEDROCK_MODEL <model ID>` and then update whatever already exists:
+
+| If you have already done | Also do this |
+| --- | --- |
+| Step 3.2, the F5 connection | In the F5 AI Security UI, go to **Configuration > Connections**, open the three-dot menu on the `bedrock-lab` connection, select **Manage model**, change **Model name**, and select **Test and connect** |
+| Step 4.1, the LobeChat containers | Run the whole block in step 4.1 again. It recreates both containers with the new model. |
+| Step 5.3 and 5.4, the multi-agent app | Run the `make_env` block in step 5.3 again, stop both copies with `Ctrl+C`, and start them again as in step 5.4 |
+
+The connection keeps its name, so project tokens and client URLs do not change.
+
 ### 1.7 Get the F5 items from your instructor
 
 Two items come from F5 and cannot be created by you. Have both in hand before Section 2. You store them in step 2.2.
@@ -1113,7 +1169,7 @@ Reference: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-genera
 You will know because every prompt starts failing in every client at the same moment, in both the baseline and protected projects, and the direct `curl` check in step 9 fails too. To renew:
 
 1. Repeat steps 1 to 9 above to create and save a new key.
-2. In the F5 AI Security UI, go to **Configuration > Connections**. Open the three-dot menu on the `bedrock-gpt-oss` connection and select **Manage model**.
+2. In the F5 AI Security UI, go to **Configuration > Connections**. Open the three-dot menu on the `bedrock-lab` connection and select **Manage model**.
 3. Replace the **API key** with the new key and select **Test and connect**.
 
 Nothing else changes. LobeChat and the multi-agent app use F5 project tokens, not the Bedrock key, so they work again immediately without a restart. You will also do this at the start of each new day if you continue with follow-on labs.
@@ -1137,27 +1193,35 @@ Bedrock exposes a chat completions endpoint, so you use the built-in **OpenAI Co
 
 1. In the menu under **Configuration**, select **Connections**.
 2. On the **Models** tab, find **OpenAI Compatible** and select **Add**.
-3. Fill in the form:
+3. In your terminal, print the values to type into the form. They come from `lab.env`, so they match what the rest of the lab uses:
+
+   ```bash
+   echo "Display name: $F5_CONNECTION"
+   echo "Model name:   $BEDROCK_MODEL"
+   echo "URL:          https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions"
+   ```
+
+4. Fill in the form:
 
    | Field | Value |
    | --- | --- |
-   | **Display name** | `bedrock-gpt-oss` (must equal `F5_CONNECTION` in `lab.env`; no spaces) |
-   | **Model name** | `openai.gpt-oss-120b-1:0` (case-sensitive) |
+   | **Display name** | The `Display name` printed above. With the defaults it is `bedrock-lab`. |
+   | **Model name** | The `Model name` printed above. With the defaults it is `openai.gpt-oss-120b-1:0`. It is case-sensitive. |
    | **API key** | The Bedrock API key from step 3.1. Paste it from the console tab you left open. |
-   | **URL** | `https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions` |
+   | **URL** | The `URL` printed above |
    | **Endpoint** | Chat completions (cannot be changed later) |
 
-4. Select **Test and connect**.
+5. Select **Test and connect**.
 
 The platform sends the prompt "Hello there" to Bedrock. On success you see **Configuration Saved!** and the connection appears under **Model connections**. On failure nothing is saved. Expand **Error** to read why.
 
-> The **Display name** becomes part of the URL that clients call: `https://<F5_HOST>/openai/<Display name>`. Keep it short and lowercase.
+> The **Display name** becomes part of the URL that clients call: `https://<F5_HOST>/openai/<Display name>`. It is a label for the connection, not the model, so it stays the same if you change the model later.
 
 ### 3.3 Create the baseline project
 
 1. Select **Projects**, then **Create**.
 2. Choose **Guardrails**.
-3. Set **Project name** to `lab-baseline`, project type to **App**, the default model to `bedrock-gpt-oss`, and yourself as project admin.
+3. Set **Project name** to `lab-baseline`, project type to **App**, the default model to `bedrock-lab`, and yourself as project admin.
 4. Select **Create**.
 5. Leave every guardrail **off** in this project.
 
@@ -1659,6 +1723,7 @@ done
 | The step 1.6 check works but the key gets an access error | Your role lacks `bedrock:CallWithBearerToken`, or the account blocks Bedrock API keys | Give the error text to your AWS administrator, or ask for a long-term key (step 3.1, fallback) |
 | **Test and connect** rejects the key or the field cuts it off | The short-term key is too long for the field in your release | Use a long-term key (step 3.1, fallback), which is much shorter |
 | Error says the model is not supported on this route | The model is served on a different Bedrock endpoint | Try the URL `https://bedrock-mantle.<region>.api.aws/v1/chat/completions` with model `openai.gpt-oss-120b` |
+| You need a different model, or the chosen one is not available | The default model does not suit your account or region | See "Optional - use a different Bedrock model" in step 1.6 |
 | **Test and connect** fails in F5 but the Section 1 check passes | Typo in **Model name** or **URL** | The URL must be the full path ending in `/chat/completions` |
 | `ask` prints an invalid token error | Token pasted with a space or newline, or it expired | Generate a new project token (3.5) |
 | `ask` returns "not found" for the connection | `F5_CONNECTION` does not match the connection's **Display name** | Make them identical |
@@ -1719,7 +1784,7 @@ Reference: <https://docs.aisecurity.f5.com/onboarding/connections/connect-model-
 None of the following could be tested without a licensed cluster. Run the whole guide once and correct these points.
 
 1. **Guardrail UI labels (3.4).** The connection, project, and token steps follow the public documentation. The steps for enabling guardrails inside a project are described by category because the documentation pages reviewed did not give exact labels. Replace 3.4 with the exact names for your operator version.
-2. **Tool calling through the Bedrock connection (Section 5).** The app forces specific tool calls and asks for JSON output. Confirm that `openai.gpt-oss-120b-1:0` behind the OpenAI Compatible connection honors both. If it does not, pick a Bedrock model that does and update `BEDROCK_MODEL` and the connection's **Model name**.
+2. **Tool calling through the Bedrock connection (Section 5).** The app forces specific tool calls and asks for JSON output. Confirm that `openai.gpt-oss-120b-1:0` behind the OpenAI Compatible connection honors both. If it does not, pick a Bedrock model that does and change it as described under "Optional - use a different Bedrock model" in step 1.6. To change the default for the whole class, edit `BEDROCK_MODEL` in `config/lab.env.example`.
 3. **Short-term Bedrock key (steps 1.6 and 3.1).** The guide defaults to a short-term key because students cannot create IAM users. Confirm on a live account: (a) how long a console session, and so the key, lasts for your students, and whether it covers Sections 3 to 5; (b) that the OpenAI Compatible connection's **API key** field accepts a key of that length; (c) that replacing the key through **Manage model** restores service without touching projects or tokens; and (d) that the `aws bedrock-runtime converse` check in step 1.6 returns text for the chosen model. If sessions are too short, hand out long-term keys and have students use the fallback in step 3.1.
 4. **Blocked-response shape (Sections 3-5).** The app reports `blocked` when the error body contains `error.cai_error.outcome = "blocked"`. Confirm your release returns that shape so the app shows `blocked` instead of a generic 500 error.
 5. **LobeChat (Section 4).** The containers are published on `127.0.0.1` only. If students must reach LobeChat from another machine, change the `-p` option and set LobeChat's `ACCESS_CODE`. Confirm the pinned tag `lobehub/lobe-chat:1.143.3` pulls, that `NODE_EXTRA_CA_CERTS` makes it trust the lab certificate, and that streamed replies pass through F5 AI Security. `lobehub/lobe-chat` is the v1 single-container image. The v2 image (`lobehub/lobehub`) needs PostgreSQL, Redis, and object storage and is not suitable for a short lab.
@@ -1754,4 +1819,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 - F5 AI Security, create a project: <https://docs.aisecurity.f5.com/use-cases/create-project.html>
 - F5 AI Security, install with Helm (license and Remediate note): <https://docs.aisecurity.f5.com/get-started/get-started-helm.html>
 - Amazon Bedrock, Chat Completions API: <https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions-mantle.html>
+- Amazon Bedrock, Models at a glance (model IDs): <https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html>
+- Amazon Bedrock, API compatibility by models: <https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html>
+- Amazon Bedrock, Endpoint availability by models: <https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html>
 - LobeChat, Docker deployment: <https://chat-docs.lobehub.com/en/self-hosting/platform/docker>
