@@ -84,6 +84,7 @@ Usage:
   scripts/guardrails-poc.sh [--config FILE] [--dry-run] up
   scripts/guardrails-poc.sh [--config FILE] [--dry-run] down [--yes]
   scripts/guardrails-poc.sh [--config FILE] [--dry-run] status
+  scripts/guardrails-poc.sh [--config FILE] [--dry-run] access
 
 Secret inputs:
   Harbor:
@@ -94,11 +95,21 @@ Secret inputs:
     F5_LICENSE_STRING environment variable, or
     F5_LICENSE_FILE containing the license string.
 
+Access control:
+  The ingress load balancer only accepts the addresses in ALLOWED_SOURCE_CIDRS
+  ("auto" = the public IP of the machine running this script). Run `access`
+  to re-apply the list after your IP address changes.
+
+  The initial admin password is replaced before the ingress is created. The new
+  password comes from GUARDRAILS_ADMIN_PASSWORD or ADMIN_PASSWORD_FILE; if
+  neither exists a random one is generated and saved to ADMIN_PASSWORD_FILE.
+
 Examples:
   cp config/guardrails-poc.env.example config/guardrails-poc.env
   scripts/guardrails-poc.sh preflight
   scripts/guardrails-poc.sh up
   scripts/guardrails-poc.sh status
+  scripts/guardrails-poc.sh access
   scripts/guardrails-poc.sh down --yes
 EOF
 }
@@ -122,7 +133,7 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
-    preflight|up|down|status)
+    preflight|up|down|status|access)
       ACTION="$1"
       shift
       ;;
@@ -195,6 +206,21 @@ load_config() {
   POSTGRES_PASSWORD_FILE="${POSTGRES_PASSWORD_FILE:-.secrets/postgres-password}"
   RECREATE_TLS_SECRET="${RECREATE_TLS_SECRET:-false}"
   CLEANUP_LEFTOVER_EBS_VOLUMES="${CLEANUP_LEFTOVER_EBS_VOLUMES:-true}"
+  RESTRICT_INGRESS_SOURCE="${RESTRICT_INGRESS_SOURCE:-true}"
+  ALLOWED_SOURCE_CIDRS="${ALLOWED_SOURCE_CIDRS:-auto}"
+  PUBLIC_IP_LOOKUP_URL="${PUBLIC_IP_LOOKUP_URL:-https://checkip.amazonaws.com}"
+  ROTATE_DEFAULT_PASSWORD="${ROTATE_DEFAULT_PASSWORD:-true}"
+  ALLOW_DEFAULT_PASSWORD="${ALLOW_DEFAULT_PASSWORD:-false}"
+  ADMIN_PASSWORD_FILE="${ADMIN_PASSWORD_FILE:-.secrets/admin-password}"
+  KEYCLOAK_SERVICE="${KEYCLOAK_SERVICE:-cai-moderator}"
+  KEYCLOAK_SERVICE_PORT="${KEYCLOAK_SERVICE_PORT:-8080}"
+  KEYCLOAK_ADMIN_REALM="${KEYCLOAK_ADMIN_REALM:-master}"
+  KEYCLOAK_BASE_PATHS="${KEYCLOAK_BASE_PATHS:-/auth /}"
+  PASSWORD_ROTATION_ATTEMPTS="${PASSWORD_ROTATION_ATTEMPTS:-40}"
+  ALLOWED_CIDRS_RESOLVED=""
+  ALLOWED_CIDRS_SOURCE=""
+  ALLOWED_CIDRS_ERROR=""
+  ADMIN_PASSWORD=""
 }
 
 run() {
@@ -507,6 +533,106 @@ check_license_string() {
   fi
 }
 
+detect_public_ip() {
+  curl -fsS --max-time 10 "$PUBLIC_IP_LOOKUP_URL" 2>/dev/null | tr -d '[:space:]' || true
+}
+
+normalize_cidrs() {
+  python3 - "$@" <<'PY'
+import ipaddress
+import sys
+
+out = []
+for raw in sys.argv[1:]:
+    for item in raw.replace(",", " ").split():
+        try:
+            net = ipaddress.ip_network(item if "/" in item else item + "/32", strict=False)
+        except ValueError:
+            sys.stderr.write("invalid address or CIDR: %s\n" % item)
+            sys.exit(1)
+        if net.version != 4:
+            sys.stderr.write("only IPv4 addresses and CIDRs are supported: %s\n" % item)
+            sys.exit(1)
+        if str(net) not in out:
+            out.append(str(net))
+print(" ".join(out))
+PY
+}
+
+# Sets ALLOWED_CIDRS_RESOLVED (space separated) and ALLOWED_CIDRS_SOURCE.
+# Returns 1 and sets ALLOWED_CIDRS_ERROR when the list cannot be built.
+resolve_allowed_cidrs() {
+  ALLOWED_CIDRS_RESOLVED=""
+  ALLOWED_CIDRS_SOURCE=""
+  ALLOWED_CIDRS_ERROR=""
+  [[ "$RESTRICT_INGRESS_SOURCE" == "true" ]] || return 0
+
+  local item detected="" normalized
+  local raw=""
+  ALLOWED_CIDRS_SOURCE="ALLOWED_SOURCE_CIDRS"
+  for item in ${ALLOWED_SOURCE_CIDRS//,/ }; do
+    if [[ "$item" == "auto" ]]; then
+      if [[ "$DRY_RUN" == true ]]; then
+        ALLOWED_CIDRS_RESOLVED="<public-ip-of-this-machine>/32"
+        ALLOWED_CIDRS_SOURCE="detected when the command really runs"
+        return 0
+      fi
+      if [[ -z "$detected" ]]; then
+        detected="$(detect_public_ip)"
+        if [[ -z "$detected" ]]; then
+          ALLOWED_CIDRS_ERROR="Could not detect this machine's public IP from $PUBLIC_IP_LOOKUP_URL. Set ALLOWED_SOURCE_CIDRS to your address in the config."
+          return 1
+        fi
+      fi
+      raw="$raw $detected"
+      ALLOWED_CIDRS_SOURCE="public IP of this machine: $detected"
+    else
+      raw="$raw $item"
+    fi
+  done
+
+  if [[ -z "${raw// /}" ]]; then
+    ALLOWED_CIDRS_ERROR="ALLOWED_SOURCE_CIDRS is empty. Use \"auto\" or list at least one IPv4 address or CIDR."
+    return 1
+  fi
+  if ! normalized="$(normalize_cidrs "$raw" 2>&1)"; then
+    ALLOWED_CIDRS_ERROR="ALLOWED_SOURCE_CIDRS is not valid: $normalized"
+    return 1
+  fi
+  ALLOWED_CIDRS_RESOLVED="$normalized"
+}
+
+check_ingress_source_restriction() {
+  if [[ "$RESTRICT_INGRESS_SOURCE" != "true" ]]; then
+    preflight_warn "RESTRICT_INGRESS_SOURCE is not true: the load balancer will accept connections from any address"
+    return
+  fi
+  if resolve_allowed_cidrs; then
+    preflight_ok "Load balancer will only accept: $ALLOWED_CIDRS_RESOLVED ($ALLOWED_CIDRS_SOURCE)"
+    case " $ALLOWED_CIDRS_RESOLVED " in
+      *" 0.0.0.0/0 "*) preflight_warn "ALLOWED_SOURCE_CIDRS contains 0.0.0.0/0, which allows every address" ;;
+    esac
+  else
+    preflight_fail "$ALLOWED_CIDRS_ERROR"
+  fi
+}
+
+check_admin_password_plan() {
+  local path
+  if [[ "$ROTATE_DEFAULT_PASSWORD" != "true" ]]; then
+    preflight_warn "ROTATE_DEFAULT_PASSWORD is not true: the initial password ($GUARDRAILS_DEFAULT_USERNAME / $GUARDRAILS_DEFAULT_PASSWORD) stays active until you change it by hand"
+    return
+  fi
+  path="$(resolve_repo_path "$ADMIN_PASSWORD_FILE")"
+  if [[ -n "${GUARDRAILS_ADMIN_PASSWORD:-}" ]]; then
+    preflight_ok "Initial admin password will be replaced before the ingress is created (from GUARDRAILS_ADMIN_PASSWORD)"
+  elif [[ -s "$path" ]]; then
+    preflight_ok "Initial admin password will be replaced before the ingress is created (from $ADMIN_PASSWORD_FILE)"
+  else
+    preflight_ok "Initial admin password will be replaced before the ingress is created (a new one will be generated in $ADMIN_PASSWORD_FILE)"
+  fi
+}
+
 preflight_up() {
   local mode="${1:-deploy}"
 
@@ -526,6 +652,8 @@ preflight_up() {
   printf 'Hostname:               %s\n' "$HOSTNAME"
   printf 'Route 53 managed:       %s\n' "$ROUTE53_ENABLED"
   printf 'Red Team enabled:       %s\n' "$ENABLE_RED_TEAM"
+  printf 'Restrict ingress:       %s\n' "$RESTRICT_INGRESS_SOURCE"
+  printf 'Replace admin password: %s\n' "$ROTATE_DEFAULT_PASSWORD"
   printf '\n%s\n' "$(color_text "$COLOR_BOLD" "Local tools")"
   for cmd in aws kubectl helm eksctl openssl python3 curl; do
     check_command "$cmd"
@@ -536,6 +664,12 @@ preflight_up() {
   check_harbor_secret_input
   check_harbor_file_format
   check_secret_file "F5 license" "$F5_LICENSE_FILE" "F5_LICENSE_STRING"
+
+  if [[ "$tool_failures" -eq 0 ]]; then
+    printf '\n%s\n' "$(color_text "$COLOR_BOLD" "Access control")"
+    check_ingress_source_restriction
+    check_admin_password_plan
+  fi
 
   if [[ "$tool_failures" -gt 0 ]]; then
     printf '\n%s\n' "$(color_text "$COLOR_BOLD" "AWS access")"
@@ -884,25 +1018,279 @@ PY' >/dev/null 2>&1; do
   run kubectl rollout status -n "$PREFECT_NAMESPACE" deploy/prefect-worker --timeout=300s
 }
 
+get_or_create_admin_password() {
+  local path dir
+  if [[ -n "${GUARDRAILS_ADMIN_PASSWORD:-}" ]]; then
+    ADMIN_PASSWORD="$GUARDRAILS_ADMIN_PASSWORD"
+  else
+    path="$(resolve_repo_path "$ADMIN_PASSWORD_FILE")"
+    if [[ -s "$path" ]]; then
+      ADMIN_PASSWORD="$(head -n 1 "$path" | tr -d '\r\n')"
+      [[ -n "$ADMIN_PASSWORD" ]] || die "Admin password file has an empty first line: $path"
+    else
+      dir="$(dirname "$path")"
+      mkdir -p "$dir"
+      if [[ "$dir" == "$ROOT_DIR/.secrets" ]]; then
+        chmod 700 "$dir"
+      fi
+      ADMIN_PASSWORD="$(python3 - <<'PY'
+import secrets
+import string
+
+rng = secrets.SystemRandom()
+chars = [rng.choice(string.ascii_uppercase), rng.choice(string.ascii_lowercase), rng.choice(string.digits), rng.choice("-_.")]
+chars += [rng.choice(string.ascii_letters + string.digits) for _ in range(20)]
+rng.shuffle(chars)
+print("".join(chars))
+PY
+)"
+      ( umask 077; printf '%s\n' "$ADMIN_PASSWORD" > "$path" )
+      log "Generated a new admin password and saved it to $path"
+    fi
+  fi
+  [[ "$ADMIN_PASSWORD" != "$GUARDRAILS_DEFAULT_PASSWORD" ]] || die "The new admin password must differ from the initial password"
+}
+
+password_rotation_failed() {
+  if [[ "$ALLOW_DEFAULT_PASSWORD" == "true" ]]; then
+    log "WARNING: $1"
+    log "WARNING: continuing because ALLOW_DEFAULT_PASSWORD=true. Change the password by hand as soon as the UI is reachable."
+    return 0
+  fi
+  die "$1
+The ingress was not created or updated by this run, so this run did not expose the initial password.
+Fix the problem and rerun: ./scripts/guardrails-poc.sh up
+To continue without replacing the password, set ALLOW_DEFAULT_PASSWORD=\"true\" in the config."
+}
+
+# Replaces the initial password for GUARDRAILS_DEFAULT_USERNAME in every realm,
+# talking to the login service through kubectl port-forward so it works before
+# any ingress or load balancer exists.
+rotate_default_password() {
+  if [[ "$ROTATE_DEFAULT_PASSWORD" != "true" ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
+      printf '+ skip admin password replacement because ROTATE_DEFAULT_PASSWORD is not true\n'
+    else
+      log "ROTATE_DEFAULT_PASSWORD is not true; leaving the initial admin password in place"
+    fi
+    return
+  fi
+
+  if [[ "$DRY_RUN" == true ]]; then
+    printf '+ kubectl port-forward -n %s svc/%s <local-port>:%s --address 127.0.0.1\n' "$MODERATOR_NAMESPACE" "$KEYCLOAK_SERVICE" "$KEYCLOAK_SERVICE_PORT"
+    printf '+ replace the initial password of user %s in realms: %s (and %s if not listed)\n' "$GUARDRAILS_DEFAULT_USERNAME" "$GUARDRAILS_AUTH_REALMS" "$KEYCLOAK_ADMIN_REALM"
+    printf '  new password comes from GUARDRAILS_ADMIN_PASSWORD or %s (generated if missing)\n' "$ADMIN_PASSWORD_FILE"
+    return
+  fi
+
+  get_or_create_admin_password
+  log "Replacing the initial admin password before the platform is exposed"
+
+  local attempt rc=75 port pf_pid pf_log
+  pf_log="$(mktemp)"
+  attempt=1
+  while [[ "$attempt" -le "$PASSWORD_ROTATION_ATTEMPTS" ]]; do
+    port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+    kubectl port-forward -n "$MODERATOR_NAMESPACE" "svc/$KEYCLOAK_SERVICE" "$port:$KEYCLOAK_SERVICE_PORT" --address 127.0.0.1 >"$pf_log" 2>&1 &
+    pf_pid=$!
+    rc=0
+    KC_ORIGIN="http://127.0.0.1:$port" \
+    KC_BASE_PATHS="$KEYCLOAK_BASE_PATHS" \
+    KC_ADMIN_REALM="$KEYCLOAK_ADMIN_REALM" \
+    KC_REALMS="$GUARDRAILS_AUTH_REALMS" \
+    KC_USER="$GUARDRAILS_DEFAULT_USERNAME" \
+    KC_DEFAULT_PASSWORD="$GUARDRAILS_DEFAULT_PASSWORD" \
+    KC_NEW_PASSWORD="$ADMIN_PASSWORD" \
+    python3 - <<'PY' || rc=$?
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+origin = os.environ["KC_ORIGIN"]
+admin_realm = os.environ["KC_ADMIN_REALM"]
+user = os.environ["KC_USER"]
+default_password = os.environ["KC_DEFAULT_PASSWORD"]
+new_password = os.environ["KC_NEW_PASSWORD"]
+realms = []
+for name in os.environ["KC_REALMS"].split() + [admin_realm]:
+    if name not in realms:
+        realms.append(name)
+# Other realms first, the admin realm last, so an interrupted run can be repeated.
+realms = [r for r in realms if r != admin_realm] + [admin_realm]
+
+# Never send these local requests through a corporate proxy.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def say(message):
+    print("  " + message)
+    sys.stdout.flush()
+
+
+def call(method, url, data=None, headers=None, form=False):
+    body = None
+    hdrs = dict(headers or {})
+    if data is not None:
+        if form:
+            body = urllib.parse.urlencode(data).encode()
+            hdrs["Content-Type"] = "application/x-www-form-urlencoded"
+        else:
+            body = json.dumps(data).encode()
+            hdrs["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, method=method, headers=hdrs)
+    try:
+        with opener.open(req, timeout=15) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+    except Exception:
+        return 0, b""
+
+
+base = None
+deadline = time.time() + 45
+while base is None and time.time() < deadline:
+    for path in os.environ["KC_BASE_PATHS"].split():
+        candidate = origin + path.rstrip("/")
+        status, _ = call("GET", candidate + "/realms/" + admin_realm)
+        if status == 200:
+            base = candidate
+            break
+    if base is None:
+        time.sleep(3)
+if base is None:
+    sys.exit(75)
+
+
+def token(realm, password):
+    status, body = call(
+        "POST",
+        base + "/realms/" + realm + "/protocol/openid-connect/token",
+        data={"grant_type": "password", "client_id": "admin-cli", "username": user, "password": password},
+        form=True,
+    )
+    if status == 200:
+        try:
+            return status, json.loads(body)["access_token"]
+        except Exception:
+            return 0, None
+    return status, None
+
+
+def admin_token():
+    status, value = token(admin_realm, new_password)
+    if status == 200:
+        return value, "new"
+    status, value = token(admin_realm, default_password)
+    if status == 200:
+        return value, "initial"
+    if status == 0:
+        sys.exit(75)
+    say("Cannot sign in to realm %s as %s with the new or the initial password (HTTP %s)." % (admin_realm, user, status))
+    sys.exit(3)
+
+
+_, which = admin_token()
+if which == "new":
+    say("realm %s already uses the new password" % admin_realm)
+
+failures = 0
+for realm in realms:
+    access_token, _ = admin_token()
+    auth = {"Authorization": "Bearer " + access_token}
+    query = urllib.parse.urlencode({"username": user, "exact": "true"})
+    status, body = call("GET", base + "/admin/realms/" + realm + "/users?" + query, headers=auth)
+    if status == 404:
+        say("realm %s: not found, skipped" % realm)
+        continue
+    if status != 200:
+        say("realm %s: could not look up user %s (HTTP %s)" % (realm, user, status))
+        failures += 1
+        continue
+    matches = [u for u in json.loads(body) if str(u.get("username", "")).lower() == user.lower()]
+    if not matches:
+        say("realm %s: no user named %s, nothing to change" % (realm, user))
+        continue
+    status, body = call(
+        "PUT",
+        base + "/admin/realms/" + realm + "/users/" + matches[0]["id"] + "/reset-password",
+        data={"type": "password", "temporary": False, "value": new_password},
+        headers=auth,
+    )
+    if status in (200, 204):
+        say("realm %s: password replaced" % realm)
+    else:
+        say("realm %s: password change was refused (HTTP %s) %s" % (realm, status, body[:200].decode("utf-8", "replace")))
+        failures += 1
+
+if failures:
+    sys.exit(5)
+
+still_open = [realm for realm in realms if token(realm, default_password)[0] == 200]
+if still_open:
+    say("The initial password is still accepted in: %s" % " ".join(still_open))
+    sys.exit(4)
+say("verified: the initial password is rejected in: %s" % " ".join(realms))
+PY
+    kill "$pf_pid" >/dev/null 2>&1 || true
+    wait "$pf_pid" 2>/dev/null || true
+    [[ "$rc" -eq 75 ]] || break
+    log "Login service is not reachable yet (attempt $attempt/$PASSWORD_ROTATION_ATTEMPTS); retrying in 15s"
+    attempt=$((attempt + 1))
+    sleep 15
+  done
+  rm -f "$pf_log"
+
+  case "$rc" in
+    0) log "Initial admin password replaced. The current password is in $(resolve_repo_path "$ADMIN_PASSWORD_FILE") unless GUARDRAILS_ADMIN_PASSWORD was used." ;;
+    75) password_rotation_failed "Could not reach the login service at svc/$KEYCLOAK_SERVICE:$KEYCLOAK_SERVICE_PORT in namespace $MODERATOR_NAMESPACE to replace the initial admin password." ;;
+    3) password_rotation_failed "Could not sign in to replace the admin password. If you already changed it by hand, put the current password on the first line of $ADMIN_PASSWORD_FILE." ;;
+    4) password_rotation_failed "The initial admin password is still accepted in at least one realm after the change." ;;
+    *) password_rotation_failed "Replacing the initial admin password failed (exit code $rc). See the messages above." ;;
+  esac
+}
+
+ingress_source_ranges_csv() {
+  printf '%s' "${ALLOWED_CIDRS_RESOLVED// /,}"
+}
+
 install_ingress() {
   run helm repo add "$INGRESS_REPO_NAME" "$INGRESS_REPO_URL" --force-update
   run helm repo update "$INGRESS_REPO_NAME"
 
+  local -a helm_args
+  helm_args=(upgrade --install "$INGRESS_RELEASE" "$INGRESS_CHART"
+    --namespace "$INGRESS_NAMESPACE"
+    --create-namespace
+    --set-string 'controller.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-type=nlb'
+    --set-string 'controller.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing'
+    --set controller.service.externalTrafficPolicy=Local)
+  if [[ "$RESTRICT_INGRESS_SOURCE" == "true" ]]; then
+    resolve_allowed_cidrs || die "$ALLOWED_CIDRS_ERROR"
+    # Set at creation time so the load balancer is never open to every address.
+    helm_args+=(--set "controller.service.loadBalancerSourceRanges={$(ingress_source_ranges_csv)}")
+  fi
+
   if [[ "$DRY_RUN" == true ]]; then
-    run helm upgrade --install "$INGRESS_RELEASE" "$INGRESS_CHART" --namespace "$INGRESS_NAMESPACE" --create-namespace --set-string 'controller.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-type=nlb' --set-string 'controller.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing' --set controller.service.externalTrafficPolicy=Local
+    run helm "${helm_args[@]}"
     run kubectl rollout status -n "$INGRESS_NAMESPACE" deploy/"$INGRESS_CONTROLLER_DEPLOYMENT" --timeout=300s
     return
+  fi
+
+  if [[ "$RESTRICT_INGRESS_SOURCE" == "true" ]]; then
+    log "Ingress load balancer will only accept: $ALLOWED_CIDRS_RESOLVED ($ALLOWED_CIDRS_SOURCE)"
+  else
+    log "WARNING: RESTRICT_INGRESS_SOURCE is not true; the ingress load balancer accepts every address"
   fi
 
   local attempt status
   for attempt in 1 2; do
     log "helm upgrade --install $INGRESS_RELEASE $INGRESS_CHART --namespace $INGRESS_NAMESPACE"
-    if helm upgrade --install "$INGRESS_RELEASE" "$INGRESS_CHART" \
-      --namespace "$INGRESS_NAMESPACE" \
-      --create-namespace \
-      --set-string 'controller.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-type=nlb' \
-      --set-string 'controller.service.annotations.service\.beta\.kubernetes\.io/aws-load-balancer-scheme=internet-facing' \
-      --set controller.service.externalTrafficPolicy=Local; then
+    if helm "${helm_args[@]}"; then
       break
     fi
 
@@ -1313,6 +1701,93 @@ public_url_health() {
   fi
 }
 
+ingress_access_health() {
+  local ranges my_ip verdict
+  ranges="$(kubectl get svc -n "$INGRESS_NAMESPACE" "$INGRESS_CONTROLLER_SERVICE" -o jsonpath='{.spec.loadBalancerSourceRanges[*]}' 2>/dev/null || true)"
+  if [[ -z "$ranges" ]]; then
+    if kubectl get svc -n "$INGRESS_NAMESPACE" "$INGRESS_CONTROLLER_SERVICE" >/dev/null 2>&1; then
+      printf 'failed (open to every address; run ./scripts/guardrails-poc.sh access)'
+    else
+      printf 'pending (ingress controller service not found)'
+    fi
+    return
+  fi
+
+  my_ip="$(curl -fsS --max-time 5 "$PUBLIC_IP_LOOKUP_URL" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -z "$my_ip" ]]; then
+    printf 'ready (restricted to %s)' "$ranges"
+    return
+  fi
+  verdict="$(python3 - "$my_ip" $ranges <<'PY' 2>/dev/null || true
+import ipaddress
+import sys
+
+try:
+    ip = ipaddress.ip_address(sys.argv[1])
+    print("yes" if any(ip in ipaddress.ip_network(c, strict=False) for c in sys.argv[2:]) else "no")
+except ValueError:
+    print("unknown")
+PY
+)"
+  if [[ "$verdict" == "no" ]]; then
+    printf 'warning (restricted to %s; this machine is %s and is NOT allowed; run ./scripts/guardrails-poc.sh access)' "$ranges" "$my_ip"
+  else
+    printf 'ready (restricted to %s; this machine is %s)' "$ranges" "$my_ip"
+  fi
+}
+
+admin_password_health() {
+  local realm code reached=false still=""
+  for realm in $KEYCLOAK_ADMIN_REALM $GUARDRAILS_AUTH_REALMS; do
+    code="$(curl -k -sS -o /dev/null -w '%{http_code}' --max-time 8 \
+      "https://$HOSTNAME/auth/realms/$realm/protocol/openid-connect/token" \
+      --data-urlencode grant_type=password --data-urlencode client_id=admin-cli \
+      --data-urlencode "username=$GUARDRAILS_DEFAULT_USERNAME" \
+      --data-urlencode "password=$GUARDRAILS_DEFAULT_PASSWORD" 2>/dev/null || true)"
+    case "$code" in
+      200) reached=true; case " $still " in *" $realm "*) ;; *) still="$still $realm" ;; esac ;;
+      ""|000) ;;
+      *) reached=true ;;
+    esac
+  done
+  if [[ -n "$still" ]]; then
+    printf 'failed (initial password still accepted in realm:%s)' "$still"
+  elif [[ "$reached" == true ]]; then
+    printf 'ready (initial password rejected)'
+  else
+    printf 'unknown (https://%s is not reachable from this machine)' "$HOSTNAME"
+  fi
+}
+
+do_access() {
+  require_tools
+  [[ "$RESTRICT_INGRESS_SOURCE" == "true" ]] || die "RESTRICT_INGRESS_SOURCE is not true in $CONFIG_FILE; nothing to apply"
+  resolve_allowed_cidrs || die "$ALLOWED_CIDRS_ERROR"
+
+  local patch
+  patch="$(python3 - $ALLOWED_CIDRS_RESOLVED <<'PY'
+import json
+import sys
+
+print(json.dumps({"spec": {"loadBalancerSourceRanges": sys.argv[1:]}}))
+PY
+)"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    run kubectl patch svc -n "$INGRESS_NAMESPACE" "$INGRESS_CONTROLLER_SERVICE" --type merge -p "$patch"
+    return
+  fi
+
+  cluster_exists || die "EKS cluster not found: $CLUSTER_NAME in $AWS_REGION"
+  aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null
+  kubectl get svc -n "$INGRESS_NAMESPACE" "$INGRESS_CONTROLLER_SERVICE" >/dev/null 2>&1 \
+    || die "Ingress controller service not found. Run ./scripts/guardrails-poc.sh up first."
+  log "Restricting the ingress load balancer to: $ALLOWED_CIDRS_RESOLVED ($ALLOWED_CIDRS_SOURCE)"
+  run kubectl patch svc -n "$INGRESS_NAMESPACE" "$INGRESS_CONTROLLER_SERVICE" --type merge -p "$patch"
+  status_line "Ingress access" "$(ingress_access_health)"
+  printf 'AWS can take up to a minute to apply the change to the node security group.\n'
+}
+
 print_troubleshooting_hints() {
   printf '\n%s\n' "$(color_text "$COLOR_BOLD" "Troubleshooting")"
   printf '  Detailed pods:      kubectl get pods -A\n'
@@ -1325,9 +1800,21 @@ print_access_info() {
   local realm
   print_heading "Access" "======"
   status_line "UI" "https://$HOSTNAME"
-  status_line "Initial username" "$GUARDRAILS_DEFAULT_USERNAME"
-  status_line "Initial password" "$GUARDRAILS_DEFAULT_PASSWORD (until changed)"
-  printf 'Password change:\n'
+  if [[ "$ROTATE_DEFAULT_PASSWORD" == "true" ]]; then
+    status_line "Username" "$GUARDRAILS_DEFAULT_USERNAME"
+    if [[ -n "${GUARDRAILS_ADMIN_PASSWORD:-}" ]]; then
+      status_line "Password" "the value of GUARDRAILS_ADMIN_PASSWORD"
+    else
+      status_line "Password" "saved in $(resolve_repo_path "$ADMIN_PASSWORD_FILE")"
+    fi
+    printf 'The script replaced the initial password (%s) in every realm during up.\n' "$GUARDRAILS_DEFAULT_PASSWORD"
+    printf 'To choose your own password afterwards, use the pages below, then put the new password on the\n'
+    printf 'first line of %s so later runs of up can still sign in:\n' "$ADMIN_PASSWORD_FILE"
+  else
+    status_line "Initial username" "$GUARDRAILS_DEFAULT_USERNAME"
+    status_line "Initial password" "$GUARDRAILS_DEFAULT_PASSWORD (until changed)"
+    printf 'Password change:\n'
+  fi
   for realm in $GUARDRAILS_AUTH_REALMS; do
     printf '  Realm %-12s https://%s/auth/realms/%s/account/#/security/signingin\n' "$realm" "$HOSTNAME" "$realm"
   done
@@ -1371,8 +1858,10 @@ verify_public_url() {
     fi
     sleep 10
   done
-  run curl -k -I --max-time 20 "https://$HOSTNAME/"
-  run curl -k -I --max-time 20 "https://$HOSTNAME/auth/"
+  run curl -k -I --max-time 20 "https://$HOSTNAME/" \
+    || log "WARNING: https://$HOSTNAME/ did not answer from this machine yet. Check DNS and ALLOWED_SOURCE_CIDRS, then run status."
+  run curl -k -I --max-time 20 "https://$HOSTNAME/auth/" \
+    || log "WARNING: https://$HOSTNAME/auth/ did not answer from this machine yet."
 }
 
 do_up() {
@@ -1384,6 +1873,10 @@ do_up() {
   apply_security_operator
   wait_for_app
   fix_prefect_workflows
+  # Order matters: replace the initial password while the platform is still
+  # reachable only from inside the cluster, then create the load balancer
+  # already restricted to the allowed source addresses.
+  rotate_default_password
   install_ingress
   create_tls_secret
   apply_ingress
@@ -1461,6 +1954,8 @@ status() {
   else
     status_line "Ingress LB" "pending"
   fi
+  status_line "Ingress access" "$(ingress_access_health)"
+  status_line "Admin password" "$(admin_password_health)"
   status_line "EKS cluster" "${cluster_status:-unknown}, Kubernetes ${cluster_version:-unknown}, region $AWS_REGION"
   status_line "Node" "$(node_health)"
   status_line "Guardrails node group" "$(nodegroup_health "$GUARDRAIL_NODEGROUP_NAME")"
@@ -1508,5 +2003,6 @@ case "$ACTION" in
   up) do_up ;;
   down) do_down ;;
   status) require_tools; status ;;
+  access) do_access ;;
   *) die "Unknown action: $ACTION" ;;
 esac
