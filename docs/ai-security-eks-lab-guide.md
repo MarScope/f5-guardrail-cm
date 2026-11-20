@@ -23,6 +23,7 @@ Hands-on lab: deploy F5 AI Security (Guardrails) on Amazon EKS, connect it to a 
 - [Troubleshooting](#troubleshooting)
 - [Appendix A - Bedrock through a custom Converse connection](#appendix-a---bedrock-through-a-custom-converse-connection)
 - [Appendix B - Instructor notes](#appendix-b---instructor-notes)
+- [Appendix C - Diagnose a Bedrock API key](#appendix-c---diagnose-a-bedrock-api-key)
 
 ## What you will build
 
@@ -1136,11 +1137,22 @@ Know its limits before you start:
 To get the longest life from the key, start with a fresh console session.
 
 1. Sign out of the AWS console (and your company's access portal, if you use one), then sign in again.
-2. In the region selector at the top right of the console, choose your Bedrock region. To see which one that is, run `echo $BEDROCK_REGION` in your terminal.
-3. Type `Bedrock` in the search bar and open **Amazon Bedrock**.
+2. Open the Amazon Bedrock console **in your Bedrock region**. Run this in your terminal and open the address it prints in your browser:
+
+   ```bash
+   echo "https://${BEDROCK_REGION}.console.aws.amazon.com/bedrock/home?region=${BEDROCK_REGION}"
+   ```
+
+3. **Check the region in the browser's address bar.** This is the most common mistake in this step. The key works only in the region where it is created, and the console may have switched to a different region than you expect. With the default region, the address must look like this:
+
+   ```text
+   https://us-east-1.console.aws.amazon.com/bedrock/home?region=us-east-1#/...
+   ```
+
+   The region appears twice: at the very start of the address, and after `region=`. Both must match the value printed by `echo $BEDROCK_REGION`. If they do not, choose the correct region in the selector at the top right of the console, then look at the address bar again.
 4. In the left menu, select **API keys**.
-5. Select the **Short-term API keys** tab, then **Generate short-term API keys**.
-6. Copy the key. It is long, often more than a thousand characters. That is normal.
+5. Select the **Short-term API keys** tab. Look at the address bar one more time to confirm the region, then select **Generate short-term API keys**.
+6. Copy the key. It is long, around three thousand characters. That is normal.
 7. In your terminal, save it. The command asks you to paste the key and does not display it:
 
    ```bash
@@ -1164,12 +1176,12 @@ To get the longest life from the key, start with a fresh console session.
 
    **Success** is `HTTP 200` and a reply that contains `"choices"` with a short greeting inside it.
 
-   Anything else is an error, and the reply says what went wrong:
+   Anything else is an error, and the reply says what went wrong. If the cause is not obvious, [Appendix C](#appendix-c---diagnose-a-bedrock-api-key) inspects the key for you.
 
    | What you see | Likely cause | What to do |
    | --- | --- | --- |
    | `key length=7` in the first line | The key was not saved. The value is still `NOT-SET`. | Run `labvar BEDROCK_API_KEY` again and paste the key |
-   | `HTTP 401` or `403` with a message about an invalid or expired token | The key expired, or it was created in a different region. A short-term key works only in the region that was selected in the console when you created it. | Check that the console region matches `region=[...]` in the first line, then create a new key |
+   | `Authentication failed: Please make sure your API Key is valid.` | Most often the key was created in a different region. A short-term key works only in the region shown in the console's address bar when you created it. It can also mean the key expired or was not copied whole. | Run the checks in [Appendix C](#appendix-c---diagnose-a-bedrock-api-key). They show which region the key belongs to and when it was created. Then create a new key in the right region. |
    | `HTTP 403` with "not authorized" or "access denied" | Your role lacks `bedrock:InvokeModel` or `bedrock:CallWithBearerToken`, or your organization blocks Bedrock API keys | Give the full reply to your AWS administrator. See step 1.4, Part A. |
    | `HTTP 400` or `404` that names the model | The model is not available to your account in this region, or is not served on this endpoint | See "Optional - use a different Bedrock model" in step 1.6 |
 
@@ -1732,7 +1744,7 @@ done
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Every prompt fails in every client at once, including the baseline project | The short-term Bedrock key expired | Renew it: step 3.1, "When the key expires" |
-| The direct `curl` check in step 3.1 fails right after you create the key | Wrong region selected in the console, or the key was cut short when pasted | Create the key in the region shown by `echo $BEDROCK_REGION`, and save it again with `labvar BEDROCK_API_KEY` |
+| The direct `curl` check in step 3.1 says `Authentication failed: Please make sure your API Key is valid.` | The key was created in a different region than `BEDROCK_REGION`, or it was not copied whole | Run [Appendix C](#appendix-c---diagnose-a-bedrock-api-key) to see which. Then create the key again, checking the region in the address bar as in step 3.1. |
 | The step 1.6 check works but the key gets an access error | Your role lacks `bedrock:CallWithBearerToken`, or the account blocks Bedrock API keys | Give the error text to your AWS administrator, or ask for a long-term key (step 3.1, fallback) |
 | **Test and connect** rejects the key or the field cuts it off | The short-term key is too long for the field in your release | Use a long-term key (step 3.1, fallback), which is much shorter |
 | Error says the model is not supported on this route | The model is served on a different Bedrock endpoint | Try the URL `https://bedrock-mantle.<region>.api.aws/v1/chat/completions` with model `openai.gpt-oss-120b` |
@@ -1798,7 +1810,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 
 1. **Guardrail UI labels (3.4).** The connection, project, and token steps follow the public documentation. The steps for enabling guardrails inside a project are described by category because the documentation pages reviewed did not give exact labels. Replace 3.4 with the exact names for your operator version.
 2. **Tool calling through the Bedrock connection (Section 5).** The app forces specific tool calls and asks for JSON output. Confirm that `openai.gpt-oss-120b-1:0` behind the OpenAI Compatible connection honors both. If it does not, pick a Bedrock model that does and change it as described under "Optional - use a different Bedrock model" in step 1.6. To change the default for the whole class, edit `BEDROCK_MODEL` in `config/lab.env.example`.
-3. **Short-term Bedrock key (steps 1.6 and 3.1).** The guide defaults to a short-term key because students cannot create IAM users. Confirm on a live account: (a) how long a console session, and so the key, lasts for your students, and whether it covers Sections 3 to 5; (b) that the OpenAI Compatible connection's **API key** field accepts a key of that length; (c) that replacing the key through **Manage model** restores service without touching projects or tokens; and (d) that the `aws bedrock-runtime converse` check in step 1.6 returns text for the chosen model. If sessions are too short, hand out long-term keys and have students use the fallback in step 3.1.
+3. **Short-term Bedrock key (steps 1.6 and 3.1).** First real use: a key of 3,144 characters was saved correctly by `labvar` on macOS, and a key created in the wrong console region was rejected with `Authentication failed: Please make sure your API Key is valid.` Step 3.1 now has students confirm the region in the address bar. The console address pattern in that step (`https://<region>.console.aws.amazon.com/bedrock/home?region=<region>`) should be confirmed once on a live console. The guide defaults to a short-term key because students cannot create IAM users. Confirm on a live account: (a) how long a console session, and so the key, lasts for your students, and whether it covers Sections 3 to 5; (b) that the OpenAI Compatible connection's **API key** field accepts a key of that length; (c) that replacing the key through **Manage model** restores service without touching projects or tokens; and (d) that the `aws bedrock-runtime converse` check in step 1.6 returns text for the chosen model. If sessions are too short, hand out long-term keys and have students use the fallback in step 3.1.
 4. **Blocked-response shape (Sections 3-5).** The app reports `blocked` when the error body contains `error.cai_error.outcome = "blocked"`. Confirm your release returns that shape so the app shows `blocked` instead of a generic 500 error.
 5. **LobeChat (Section 4).** The containers are published on `127.0.0.1` only. If students must reach LobeChat from another machine, change the `-p` option and set LobeChat's `ACCESS_CODE`. Confirm the pinned tag `lobehub/lobe-chat:1.143.3` pulls, that `NODE_EXTRA_CA_CERTS` makes it trust the lab certificate, and that streamed replies pass through F5 AI Security. `lobehub/lobe-chat` is the v1 single-container image. The v2 image (`lobehub/lobehub`) needs PostgreSQL, Redis, and object storage and is not suitable for a short lab.
 6. **Leak scenario outcome (Check 2).** Whether the baseline answer contains the client data depends on the model following the injected text. Confirm it leaks on baseline and is stopped on protected with your guardrail set. If baseline does not leak, the lab still works as a logging comparison, but the contrast is weaker.
@@ -1836,3 +1848,57 @@ None of the following could be tested without a licensed cluster. Run the whole 
 - Amazon Bedrock, API compatibility by models: <https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html>
 - Amazon Bedrock, Endpoint availability by models: <https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html>
 - LobeChat, Docker deployment: <https://chat-docs.lobehub.com/en/self-hosting/platform/docker>
+
+## Appendix C - Diagnose a Bedrock API key
+
+Use this when the direct Bedrock check in step 3.1 fails, most often with `Authentication failed: Please make sure your API Key is valid.` It answers three questions without ever displaying your key: is the saved value really a key, which region does it belong to, and is it being refused everywhere or only on one route.
+
+Run it in a terminal where you have run `source ~/f5-ai-lab/lab.env`. Paste the whole block as one piece.
+
+```bash
+python3 - <<'PY'
+import base64, os, re, urllib.parse
+k = os.environ.get("BEDROCK_API_KEY", "")
+print("length:", len(k), "| starts with:", repr(k[:16]))
+print("unexpected characters:", sorted(set(re.findall(r"[^A-Za-z0-9+/=_-]", k))) or "none")
+body = k[len("bedrock-api-key-"):] if k.startswith("bedrock-api-key-") else k
+try:
+    url = base64.b64decode(body + "=" * (-len(body) % 4)).decode("utf-8", "replace")
+    q = urllib.parse.parse_qs(urllib.parse.urlparse("https://" + url.split("://")[-1]).query)
+    cred = q.get("X-Amz-Credential", ["?"])[0].split("/")
+    print("region inside key:", cred[2] if len(cred) > 2 else "?")
+    print("created (UTC):", q.get("X-Amz-Date", ["?"])[0], "| valid for seconds:", q.get("X-Amz-Expires", ["?"])[0])
+except Exception as ex:
+    print("could not decode the key:", ex)
+PY
+
+echo "region the lab expects: $BEDROCK_REGION"
+date -u +"now (UTC):     %Y%m%dT%H%M%SZ"
+
+curl -sS -w '\nHTTP %{http_code}\n' \
+  "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/model/${BEDROCK_MODEL}/converse" \
+  -H "Authorization: Bearer ${BEDROCK_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":[{"text":"Say hello in five words."}]}]}'
+```
+
+How to read the output:
+
+| Line | What it should show | If it does not |
+| --- | --- | --- |
+| `starts with` | `'bedrock-api-key-'` | The wrong text was copied, for example a whole `export ...=` line. Copy only the key and run `labvar BEDROCK_API_KEY` again. |
+| `length` | Around 3,000 for a short-term key. A long-term key is much shorter. | `7` means the value is still `NOT-SET`. A few hundred or less for a short-term key means it was cut short. Save it again. |
+| `unexpected characters` | `none` | The paste picked up extra characters. Save the key again. If it keeps happening, tell your instructor, because it points to a problem with the `labvar` command on your system. |
+| `region inside key` | The same value as `region the lab expects` | The key was created with the console set to another region. Create a new key, checking the address bar as in step 3.1. This is the most common cause. |
+| `created (UTC)` compared with `now (UTC)` | A creation time shortly before now | The key is old. A short-term key lasts at most 12 hours and ends when the console session that created it ends. Create a new one. |
+| The final `curl` | `HTTP 200` and a reply containing a greeting | See below |
+
+Reading the final `curl`, which calls Bedrock's native API with the same key:
+
+- **It succeeds, but the check in step 3.1 failed:** the key is good and the problem is the chat completions route for this model. See "Optional - use a different Bedrock model" in step 1.6, and tell your instructor.
+- **It fails the same way:** the key is refused everywhere. If the region and age look right, your organization may block Bedrock API keys. Run the step 1.6 check again. If that still prints a greeting, your role can call the model but keys are not allowed, and you need your AWS administrator or the long-term key fallback in step 3.1.
+
+Notes:
+
+- The region and creation time are read from inside the key, which is laid out as a signed web address. If AWS changes that layout, those two lines print `?` or `could not decode the key`. That by itself does not mean the key is bad. The other lines and the final `curl` still apply.
+- A long-term key has a different layout, so for one of those only `starts with`, `length`, `unexpected characters`, and the final `curl` are meaningful.
