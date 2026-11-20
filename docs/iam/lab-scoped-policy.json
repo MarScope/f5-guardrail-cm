@@ -88,12 +88,13 @@
       }
     },
     {
-      "Sid": "LabGpuQuotaCheck",
+      "Sid": "LabQuotaAndPriceChecks",
       "Effect": "Allow",
       "Action": [
         "servicequotas:GetServiceQuota",
         "servicequotas:ListServiceQuotas",
-        "servicequotas:RequestServiceQuotaIncrease"
+        "servicequotas:RequestServiceQuotaIncrease",
+        "pricing:GetProducts"
       ],
       "Resource": "*"
     },

@@ -132,6 +132,21 @@ Options: `--config FILE` uses a config file other than `config/guardrails-poc.en
 
 The script is idempotent. If deployment stops partway through, rerun `up`; it reuses existing AWS and Kubernetes resources and continues from the current state.
 
+### Estimate the Cost
+
+`scripts/cost-estimate.sh` reads the same config file and prints the hourly cost of the requested resources, the cost for a session, and what it costs if left running. It is read-only.
+
+```bash
+./scripts/cost-estimate.sh                 # 4 hours, one deployment
+./scripts/cost-estimate.sh --hours 8
+./scripts/cost-estimate.sh --students 12   # total for a class
+./scripts/cost-estimate.sh --offline       # built-in prices only
+```
+
+Server prices come from the AWS Price List API when the role allows `pricing:GetProducts`; otherwise the script uses built-in us-east-1 list prices recorded on 2026-11-20. Bedrock usage, data transfer, F5 licensing and account discounts are not included.
+
+`preflight` also checks the account's VPC limit (each deployment creates one VPC; the default limit is 5 per region) and looks for a CloudFormation stack left behind by an earlier failed attempt.
+
 ### Configure Inputs
 
 Copy the example config:
