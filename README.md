@@ -125,7 +125,7 @@ Use the script for normal PoC lifecycle operations.
 | `preflight` | Check tools, inputs, and AWS access. Changes nothing. |
 | `up` | Deploy, or continue a partial deployment |
 | `status` | Print a health summary |
-| `access` | Re-apply the allowed source addresses, for example after your IP changes |
+| `access` | Re-apply the allowed source addresses, for example after your IP changes. See `scripts/allowed-ips.sh` to view and edit the list. |
 | `down` | Delete the environment. Asks you to type `DELETE` unless `--yes` is given. |
 
 Options: `--config FILE` uses a config file other than `config/guardrails-poc.env`. `--dry-run` prints the commands `up`, `down`, `status`, or `access` would run without changing anything. If `config/guardrails-poc.env` does not exist, the script falls back to the example file.
@@ -266,11 +266,19 @@ The ingress controller service is created with `loadBalancerSourceRanges` set fr
 | `RESTRICT_INGRESS_SOURCE` | `true` | Set to `false` to accept any address (not recommended) |
 | `ALLOWED_SOURCE_CIDRS` | `auto` | `auto` is the public IP of the machine running the script. Add more IPv4 addresses or CIDRs separated by spaces or commas, for example `auto 203.0.113.0/24`. |
 
-When your public IP changes (VPN, different network), re-apply the list without a full redeploy:
+To view or change the list on a running deployment, use `scripts/allowed-ips.sh`. It updates `ALLOWED_SOURCE_CIDRS` in the config file and applies the change in one step, without a redeploy:
 
 ```bash
-./scripts/guardrails-poc.sh access
+./scripts/allowed-ips.sh show                 # configured list, live list, your IP, and the security group rules
+./scripts/allowed-ips.sh refresh              # your public IP changed (VPN, different network)
+./scripts/allowed-ips.sh add 203.0.113.10     # allow another address or CIDR
+./scripts/allowed-ips.sh remove 203.0.113.10
+./scripts/allowed-ips.sh set me 203.0.113.10  # replace the whole list ("me" is this machine)
 ```
+
+`./scripts/guardrails-poc.sh access` is equivalent to `refresh`. Add `--dry-run` to preview a change.
+
+To allow an address from the AWS console instead, add inbound rules to the cluster security group (EKS > Clusters > your cluster > Networking > Cluster security group). Create one **Custom TCP** rule per ingress node port, which are the two ports on the existing rules described `kubernetes.io/rule/nlb/client=...`, with the address as the source. Leave the `kubernetes.io/` rules alone, because Kubernetes recreates them. Console rules are additive and are not written back to the config. Appendix D of the [lab guide](docs/ai-security-eks-lab-guide.md) has the click-by-click steps.
 
 `status` shows the current list and whether this machine is in it. `auto` is resolved each time `up` or `access` runs, so rerunning either from a new address replaces the old one.
 

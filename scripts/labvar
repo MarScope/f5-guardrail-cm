@@ -15,7 +15,7 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 LAB_ENV = os.environ.get("LAB_ENV_FILE", os.path.join(os.path.expanduser("~"), "f5-ai-lab", "lab.env"))
-CONFIG = os.path.join(REPO, "config", "guardrails-poc.env")
+CONFIG = os.environ.get("LAB_CONFIG_FILE", os.path.join(REPO, "config", "guardrails-poc.env"))
 
 
 def fail(message):
@@ -125,7 +125,7 @@ def main(argv):
         if not os.path.exists(CONFIG):
             fail("%s does not exist yet. Create it first:\n  cp %s.example %s" % (CONFIG, CONFIG, CONFIG))
         set_line(CONFIG, argv[1], argv[2].strip(), export=False)
-        print("Set %s in config/guardrails-poc.env" % argv[1])
+        print("Set %s in %s" % (argv[1], os.path.relpath(CONFIG, REPO) if CONFIG.startswith(REPO) else CONFIG))
         return
 
     if len(argv) > 2:

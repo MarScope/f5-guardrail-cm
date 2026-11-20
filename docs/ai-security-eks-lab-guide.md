@@ -24,6 +24,7 @@ Hands-on lab: deploy F5 AI Security (Guardrails) on Amazon EKS, connect it to a 
 - [Appendix A - Bedrock through a custom Converse connection](#appendix-a---bedrock-through-a-custom-converse-connection)
 - [Appendix B - Instructor notes](#appendix-b---instructor-notes)
 - [Appendix C - Diagnose a Bedrock API key](#appendix-c---diagnose-a-bedrock-api-key)
+- [Appendix D - Change who can reach the platform](#appendix-d---change-who-can-reach-the-platform)
 
 ## What you will build
 
@@ -753,7 +754,7 @@ You run one script, `scripts/guardrails-poc.sh`, with these actions:
 | `preflight` | Checks tools, credentials, quota, and configuration. Changes nothing. |
 | `up` | Builds everything. Safe to run again if it stops partway. |
 | `status` | Prints a health summary. |
-| `access` | Re-applies the allowed IP addresses, for example after your IP changes. |
+| `access` | Re-applies the allowed IP addresses, for example after your IP changes. `scripts/allowed-ips.sh` is the friendlier way to view and change the list. |
 | `down --yes` | Deletes everything. |
 
 ### 2.1 Create your configuration
@@ -956,13 +957,18 @@ You pass when check A lists your address and check B lists nothing. If either is
 
 To see the same thing in the AWS console, open **EC2 > Security Groups**, search for the group ID printed above (its name starts with `eks-cluster-sg-`), and read **Inbound rules**.
 
-**If your IP address changes** (you join or leave a VPN, or move networks), the platform stops answering. Re-apply the restriction with your new address. This takes a few seconds and does not redeploy anything:
+**Changing who is allowed.** One script shows and changes the list. Each change takes a few seconds and does not redeploy anything.
 
 ```bash
-./scripts/guardrails-poc.sh access
+./scripts/allowed-ips.sh show                 # what is allowed now, and whether this machine is
+./scripts/allowed-ips.sh refresh              # your own IP changed (VPN, new network)
+./scripts/allowed-ips.sh add 203.0.113.10     # also let someone else in, for example your instructor
+./scripts/allowed-ips.sh remove 203.0.113.10  # stop allowing them
 ```
 
-**To let someone else in**, such as your instructor, add their address to `ALLOWED_SOURCE_CIDRS` in `config/guardrails-poc.env`, for example `"auto 203.0.113.10"`, and run the same `access` command.
+If the platform stops answering partway through the lab, your IP address has probably changed. Run `refresh`.
+
+[Appendix D](#appendix-d---change-who-can-reach-the-platform) explains every option and shows how to do the same thing in the AWS console.
 
 Things to know:
 
@@ -1700,7 +1706,7 @@ For AWS sign-in problems, see Part C of step 1.4.
 | Pods in `ImagePullBackOff` | Harbor credentials wrong or expired | Fix `harbor.txt`, rerun `up` |
 | `f5-ai-sec-inference` pod `Pending` for more than 20 minutes | GPU not available to the pod | `kubectl describe pod <name> -n f5-ai-sec-inference` and read **Events** |
 | `up` exits silently right after the ingress install | Local `openssl` is too old for the `-addext` option | Install a current OpenSSL (1.1.1 or newer) and rerun `up` |
-| Browser or `curl` hangs, then times out | Your IP changed (VPN, new network), so it is no longer the allowed address | `./scripts/guardrails-poc.sh access`, wait a minute, then rerun the checks in 2.5 |
+| Browser or `curl` hangs, then times out | Your IP changed (VPN, new network), so it is no longer the allowed address | `./scripts/allowed-ips.sh refresh`, wait a minute, then `./scripts/allowed-ips.sh show` |
 | `preflight` or `up` says it could not detect this machine's public IP | The lookup site is blocked on your network | Set `ALLOWED_SOURCE_CIDRS` to your address in `guardrails-poc.env` (find it by searching "what is my IP" in a browser) |
 | `up` stops with "Could not reach the login service" | The platform pods were not ready in time | `kubectl get pods -n cai-moderator`. When all are `Running`, rerun `up`. Nothing was exposed. |
 | `up` stops with "Could not sign in to replace the admin password" | The password was changed by hand and `.secrets/admin-password` does not match | Put the current password on the first line of `.secrets/admin-password` and rerun `up` |
@@ -1827,6 +1833,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 - **Scoped permissions (step 1.4, set 2):** `docs/iam/lab-scoped-policy.json` combines the `eksctl` minimum policies with the extra calls this lab makes. It has not been run end to end. Rehearse with it once before relying on it, or use `AdministratorAccess` in a sandbox account.
 - **Shell (step 1.1):** the commands assume Bash. On macOS the default shell is zsh, where pasted comment lines and some function definitions fail, so the guide has students type `bash` first and `lab.env` warns when they forget.
 - **Sign-in expiry commands (step 1.4):** the `jq` commands were run with jq 1.7 against sample cache files written to match the AWS CLI's format, including the older `...UTC` timestamp style. They were not run against a real `~/.aws/sso/cache`. `strflocaltime` needs jq 1.6 or newer.
+- **Allowed addresses (Appendix D):** `scripts/allowed-ips.sh` was tested against stand-in `kubectl` and `aws` commands, not a live cluster. The console steps assume that Kubernetes leaves alone any security group rule it did not create. Confirm on a live cluster that a rule added by hand survives a later `refresh`, and that the console labels match.
 - **Helper commands:** `labvar`, `labcfg`, and `labsecrets` come from `scripts/labvar` and are defined in `lab.env`. Hidden input was tested on Linux with pasted values of several thousand characters. It was not tested on macOS.
 - **Shared AWS account:** give each student a unique `CLUSTER_NAME`, and confirm the G and VT quota covers 24 vCPUs per student.
 - **DNS:** decide before class whether students use Route 53 (option A) or a hosts file (option B). For option A, hand out the zone name, the hosted zone ID, and one hostname per student. The example config contains a hosted zone ID from the original author's account, which must be replaced.
@@ -1902,3 +1909,112 @@ Notes:
 
 - The region and creation time are read from inside the key, which is laid out as a signed web address. If AWS changes that layout, those two lines print `?` or `could not decode the key`. That by itself does not mean the key is bad. The other lines and the final `curl` still apply.
 - A long-term key has a different layout, so for one of those only `starts with`, `length`, `unexpected characters`, and the final `curl` are meaningful.
+
+## Appendix D - Change who can reach the platform
+
+The platform's load balancer accepts connections only from a list of source addresses. By default that list is one entry: the public IP address of the machine that ran the deployment. Use this appendix when your own address changes, or when you want to let someone else in, such as your instructor or a colleague.
+
+Two things to understand first:
+
+- **The list has one owner.** It is the `ALLOWED_SOURCE_CIDRS` setting in `config/guardrails-poc.env`. Kubernetes reads it from the ingress service and writes matching rules into the security group on the cluster nodes.
+- **Use the script when you can.** It changes the setting and applies it in one step, so the configuration and the live rules always agree. The AWS console method further down is for when you have a browser but no lab terminal. It adds rules beside the managed ones and does not update the setting.
+
+### With the script (recommended)
+
+Run these from the repository folder, in a terminal where you have run `source ~/f5-ai-lab/lab.env`:
+
+```bash
+cd ~/f5-ai-lab/f5-guardrail-cm
+```
+
+**See the current state.**
+
+```bash
+./scripts/allowed-ips.sh show
+```
+
+Example output:
+
+```text
+Configured list:           auto 203.0.113.10/32
+This machine (public IP):  198.51.100.7
+Load balancer accepts:     198.51.100.7/32 203.0.113.10/32
+This machine is allowed:   yes
+Node security group:       sg-0abc1234def567890
+Node ports:                31080 31443
+
+Security group rules for those ports (what AWS enforces):
+  port 31080  10.0.0.0/16          kubernetes.io/rule/nlb/health=a1b2c3
+  port 31080  198.51.100.7/32      kubernetes.io/rule/nlb/client=a1b2c3
+  port 31080  203.0.113.10/32      kubernetes.io/rule/nlb/client=a1b2c3
+  port 31443  198.51.100.7/32      kubernetes.io/rule/nlb/client=a1b2c3
+  port 31443  203.0.113.10/32      kubernetes.io/rule/nlb/client=a1b2c3
+```
+
+`auto` in the configured list stands for this machine's public IP. Rules ending in `health=` let the load balancer check that the nodes are alive. They cover only the cluster's private network and are expected. A line marked `OPEN TO EVERY ADDRESS` is not expected. If you see one, run `refresh`.
+
+**Change the list.**
+
+| You want to | Command |
+| --- | --- |
+| Follow your own IP after it changed (VPN on or off, new network) | `./scripts/allowed-ips.sh refresh` |
+| Also allow one more address | `./scripts/allowed-ips.sh add 203.0.113.10` |
+| Also allow a whole range, such as an office network | `./scripts/allowed-ips.sh add 198.51.100.0/24` |
+| Allow several at once | `./scripts/allowed-ips.sh add 203.0.113.10 203.0.113.11` |
+| Stop allowing an address | `./scripts/allowed-ips.sh remove 203.0.113.10` |
+| Replace the whole list with only yourself | `./scripts/allowed-ips.sh set me` |
+| Replace the whole list with specific entries | `./scripts/allowed-ips.sh set me 203.0.113.10` |
+| Preview a change without making it | Add `--dry-run` before the action, for example `./scripts/allowed-ips.sh --dry-run add 203.0.113.10` |
+
+Notes:
+
+- An address is an IPv4 address or an IPv4 range in CIDR form. The word `me` means this machine.
+- To find the address to add for someone else, ask them to open <https://checkip.amazonaws.com> in a browser and send you the number it shows.
+- AWS can take up to a minute to apply a change. Run `show` again to confirm.
+- If you remove your own address, you lose the UI from this machine, but `kubectl` and this script still work, because they reach the cluster a different way. Undo it with `./scripts/allowed-ips.sh add me`.
+- The script refuses to leave the list empty.
+- `./scripts/guardrails-poc.sh access` does the same thing as `refresh`.
+
+### In the AWS console
+
+Use this when you need to let an address in and have only a browser. It adds your own rules to the node security group. Kubernetes keeps managing its rules and leaves yours alone.
+
+**Step 1 - open the node security group.**
+
+1. Sign in to the AWS console and make sure the region at the top right is the cluster's region.
+2. Type `EKS` in the search bar and open **Elastic Kubernetes Service**.
+3. Select **Clusters**, then your cluster's name.
+4. Select the **Networking** tab.
+5. Under **Cluster security group**, select the link that starts with `sg-`. The security group opens in the EC2 console. Its name starts with `eks-cluster-sg-`.
+
+**Step 2 - find the two ports.**
+
+1. Select the **Inbound rules** tab.
+2. Find the rules whose **Description** starts with `kubernetes.io/rule/nlb/client=`. Kubernetes created these for the load balancer.
+3. Note the two different numbers in their **Port range** column. Both are between 30000 and 32767. These are the ports to open. They are not 80 and 443, because the load balancer forwards to these high ports on the nodes.
+
+**Step 3 - add a rule for each port.**
+
+1. Select **Edit inbound rules**.
+2. Select **Add rule** and fill in the new row:
+
+   | Field | Value |
+   | --- | --- |
+   | **Type** | Custom TCP |
+   | **Port range** | The first port from step 2 |
+   | **Source** | **My IP** to allow the computer you are using, or **Custom** and an address in CIDR form, such as `203.0.113.10/32`, to allow someone else |
+   | **Description** | `f5-ai-lab manual` and a name, so the rule can be recognized later |
+
+3. Select **Add rule** again and repeat for the second port, with the same source.
+4. Select **Save rules**.
+
+The address can connect within a few seconds.
+
+**To remove access later,** open **Edit inbound rules** again, select **Delete** on the rows you added, and select **Save rules**.
+
+**Rules for working in the console:**
+
+- **Do not edit or delete rules whose description starts with `kubernetes.io/`.** Kubernetes puts them back, and for a short time the platform may be unreachable or more open than intended. To change those, use the script.
+- **Never set a source of `0.0.0.0/0` or "Anywhere".** That exposes the login page to the whole internet.
+- **The script does not know about console rules.** `status` and `allowed-ips.sh show` judge "this machine is allowed" from the managed list, so they can say `NO` for an address you allowed by hand. The rule still appears in the list of security group rules that `show` prints.
+- **Console rules are not saved in the configuration.** They last until you delete them or the cluster is deleted. They are not recreated if you tear down and redeploy.
