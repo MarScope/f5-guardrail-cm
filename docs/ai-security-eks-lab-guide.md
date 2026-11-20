@@ -221,7 +221,7 @@ Work through the steps in order. Each one finishes before the next begins, and y
 | 1.3 | Download the lab material | A lab folder, both repositories, the LobeChat image, and your `lab.env` file |
 | 1.4 | Sign the command line in to AWS | `aws` commands that run as you, in the lab account |
 | 1.5 | Check the GPU quota | Confirmation that AWS will let you start the GPU servers |
-| 1.6 | Create a Bedrock API key | A key saved in `lab.env` |
+| 1.6 | Check that you can call the Bedrock model | Proof that your AWS role may use the model |
 | 1.7 | Get the F5 items from your instructor | Harbor login and license string, in hand |
 
 Treat every credential in this section like a password. Do not paste any of them into chat, email, tickets, or screenshots, and do not commit them to git.
@@ -372,13 +372,13 @@ What the lab does in AWS, and the permissions behind each action:
 | Deletes leftover disks | Cleanup | EC2 | Included in `AmazonEC2FullAccess` |
 | Reads the GPU quota and requests an increase | Step 1.5 | Service Quotas | `servicequotas:GetServiceQuota`, `ListServiceQuotas`, `RequestServiceQuotaIncrease` |
 | Creates a DNS record | Section 2, DNS option A only | Route 53 | `route53:ListHostedZones`, `ListHostedZonesByName`, `ListResourceRecordSets`, `ChangeResourceRecordSets`, `GetChange` |
-| Creates a long-term Bedrock API key | Step 1.6 | IAM, Bedrock | Create an IAM user, attach only `AmazonBedrockLimitedAccess` to it, and create a Bedrock service credential; open the Bedrock console |
-| Calls the Bedrock model | Sections 1 and 3-5 | Bedrock | Granted to the API key itself by `AmazonBedrockLimitedAccess`, not to your role |
+| Calls the Bedrock model, and creates a short-term Bedrock API key | Step 1.6, Sections 3-5 | Bedrock | `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`, `bedrock:CallWithBearerToken`, and read access to the Bedrock console. A short-term key can do only what your role can do, so your role needs these. |
+| Creates a long-term Bedrock API key | Step 3.1, fallback only | IAM | Create an IAM user, attach only `AmazonBedrockLimitedAccess` to it, and create a Bedrock service credential. Not needed if you use a short-term key. |
 
 Notes on set 2:
 
 - The policy file combines the minimum policies that the `eksctl` documentation publishes with the extra calls this lab makes. It has not been run end to end. If a step fails with `AccessDenied`, the error names the missing action. Add it, or fall back to set 1.
-- If your administrator hands out Bedrock API keys instead of letting students create them, the three `LabBedrockApiKey...` statements in the file can be removed.
+- The three `LabBedrockApiKey...` statements in the file are needed only for the long-term key fallback in step 3.1. If students use short-term keys, which is the default, remove them. They let a role create IAM users, which many organizations do not allow.
 - Reference for the `eksctl` policies: <https://docs.aws.amazon.com/eks/latest/eksctl/minimum-iam-policies.html>
 
 > **Use one AWS identity for the whole lab.** Only the identity that creates the cluster can run `kubectl` against it. If you create the cluster with one role and come back with another, `kubectl` and the script are refused.
@@ -613,40 +613,28 @@ aws service-quotas get-service-quota \
 
 In a shared account, every student's servers count against the same quota. The instructor needs 24 vCPUs per student.
 
-### 1.6 Create an Amazon Bedrock API key
+### 1.6 Check that you can call the Bedrock model
 
-F5 AI Security uses this key to call the model on Amazon Bedrock. Create a **long-term** key. A short-term key stops working when your console session ends, at most 12 hours later, which can break the lab partway through.
+In Section 3 you will create a short-term Bedrock API key so that F5 AI Security can call the model. A short-term key can do only what your own AWS role can do. So before the hour-long deployment, confirm that your role is allowed to use the model.
 
-1. Sign in to the AWS console. In the region selector at the top right, choose the region you will use for the model (`us-east-1` unless your instructor says otherwise). The key works only in the region where you create it.
-2. Type `Bedrock` in the search bar and open **Amazon Bedrock**.
-3. In the left menu, select **API keys**.
-4. Select the **Long-term API keys** tab, then **Generate long-term API keys**.
-5. Under **API key expiration**, choose the shortest period that covers the lab.
-6. Leave **Advanced permissions** as it is and select **Generate**.
-7. Copy the key. This is the only time it is shown.
-8. In your terminal, save it. The command asks you to paste the key and does not display it:
+```bash
+aws bedrock-runtime converse \
+  --region "$BEDROCK_REGION" \
+  --model-id "$BEDROCK_MODEL" \
+  --messages '[{"role":"user","content":[{"text":"Say hello in five words."}]}]' \
+  --query 'output.message.content[].text' --output text
+```
 
-   ```bash
-   labvar BEDROCK_API_KEY
-   ```
+It should print a short greeting from the model.
 
-9. Check that the key and the model work:
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| A greeting | Your role can call the model | Go to step 1.7 |
+| `AccessDeniedException` | Your role lacks `bedrock:InvokeModel`, or the model is not enabled for the account | Give the full error text to your instructor or AWS administrator. See step 1.4, Part A. |
+| `ValidationException` naming the model | The model is not offered in this region | Ask your instructor which region to use, then run `labvar BEDROCK_REGION <region>` and try again |
+| An expired-token message | Your AWS sign-in ran out | Sign in again as in step 1.4, then try again |
 
-   ```bash
-   curl -sS "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions" \
-     -H "Authorization: Bearer ${BEDROCK_API_KEY}" \
-     -H "Content-Type: application/json" \
-     -d '{"model":"'"${BEDROCK_MODEL}"'","messages":[{"role":"user","content":"Say hello in five words."}]}' \
-     | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
-   ```
-
-   It should print a short greeting from the model.
-
-If step 4 fails with a permissions error, your role may not create IAM users, which a long-term key requires. Ask your instructor for a key, then continue from step 8.
-
-If you chose a region other than `us-east-1`, also run `labvar BEDROCK_REGION <region>`.
-
-Reference: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-generate.html>
+You do not create the API key yet. A short-term key lasts 12 hours at most and often much less, so you create it at the start of Section 3, right before it is needed.
 
 ### 1.7 Get the F5 items from your instructor
 
@@ -675,22 +663,21 @@ aws sts get-caller-identity
 # 3. Docker is running and the image is present (one row, tag 1.143.3)
 docker image ls lobehub/lobe-chat
 
-# 4. Your values are set (no line may show CHANGEME or NOT-SET)
+# 4. Your values are set (the cluster name must not show CHANGEME)
 echo "Cluster: $CLUSTER_NAME"
 echo "Region:  $AWS_REGION"
-echo "Bedrock key: ${BEDROCK_API_KEY:0:6}... (${#BEDROCK_API_KEY} characters)"
 
-# 5. The Bedrock key and model work (prints a short greeting)
-curl -sS "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions" \
-  -H "Authorization: Bearer ${BEDROCK_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"'"${BEDROCK_MODEL}"'","messages":[{"role":"user","content":"Say hello in five words."}]}' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
+# 5. Your role can call the Bedrock model (prints a short greeting)
+aws bedrock-runtime converse \
+  --region "$BEDROCK_REGION" \
+  --model-id "$BEDROCK_MODEL" \
+  --messages '[{"role":"user","content":[{"text":"Say hello in five words."}]}]' \
+  --query 'output.message.content[].text' --output text
 ```
 
 If check 2 fails in the new terminal and you use method 2, that is expected: paste fresh keys from the portal, as described in step 1.4.
 
-Check 5 proves Bedrock works on its own. If a later section fails, you will know the problem is not the model.
+Check 5 proves that Bedrock works and that your role may use it. If a later section fails, you will know the problem is not the model.
 
 You also need the Harbor login and the license string from step 1.7 before you continue.
 
@@ -1076,9 +1063,75 @@ Finally, in the UI (logged in with your **new** password), confirm the menu show
 
 **Goal:** F5 AI Security can call a Bedrock model, and two projects (baseline and protected) each have a token.
 
+Start in a terminal where you have run `source ~/f5-ai-lab/lab.env`.
+
 All steps are in the F5 AI Security UI unless a command is shown.
 
-### 3.1 Add the Bedrock connection
+### 3.1 Create a short-term Bedrock API key
+
+F5 AI Security needs a Bedrock API key to call the model. You create a **short-term** key. It needs no special permissions, because it simply acts as you.
+
+Know its limits before you start:
+
+- **It expires.** The key stops working when the AWS console session you created it in ends, and after 12 hours at the latest.
+- **It works in one region only**, the one selected in the console when you create it.
+- **When it expires, every client fails at once**, because they all reach the model through this one key. The fix takes two minutes and is described in "When the key expires" below.
+
+To get the longest life from the key, start with a fresh console session.
+
+1. Sign out of the AWS console (and your company's access portal, if you use one), then sign in again.
+2. In the region selector at the top right of the console, choose your Bedrock region. To see which one that is, run `echo $BEDROCK_REGION` in your terminal.
+3. Type `Bedrock` in the search bar and open **Amazon Bedrock**.
+4. In the left menu, select **API keys**.
+5. Select the **Short-term API keys** tab, then **Generate short-term API keys**.
+6. Copy the key. It is long, often more than a thousand characters. That is normal.
+7. In your terminal, save it. The command asks you to paste the key and does not display it:
+
+   ```bash
+   labvar BEDROCK_API_KEY
+   ```
+
+8. Note the time. Write down when you created the key so you can tell later whether it might have expired.
+9. Check that the key works by calling Bedrock directly:
+
+   ```bash
+   curl -sS "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions" \
+     -H "Authorization: Bearer ${BEDROCK_API_KEY}" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"'"${BEDROCK_MODEL}"'","messages":[{"role":"user","content":"Say hello in five words."}]}' \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
+   ```
+
+   It should print a short greeting. This is the same chat completions call that F5 AI Security will make.
+
+Keep the console tab open. You need the key again in step 3.2.
+
+Reference: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-generate.html>
+
+#### When the key expires
+
+You will know because every prompt starts failing in every client at the same moment, in both the baseline and protected projects, and the direct `curl` check in step 9 fails too. To renew:
+
+1. Repeat steps 1 to 9 above to create and save a new key.
+2. In the F5 AI Security UI, go to **Configuration > Connections**. Open the three-dot menu on the `bedrock-gpt-oss` connection and select **Manage model**.
+3. Replace the **API key** with the new key and select **Test and connect**.
+
+Nothing else changes. LobeChat and the multi-agent app use F5 project tokens, not the Bedrock key, so they work again immediately without a restart. You will also do this at the start of each new day if you continue with follow-on labs.
+
+#### Fallback - a long-term key
+
+Use a long-term key only if your instructor tells you to, for example when console sessions in your account are too short for the lab. A long-term key lasts until its expiry date and is backed by an IAM user, so creating one needs permission to create IAM users. Many accounts do not allow that, in which case an administrator creates the key and gives it to you.
+
+1. Follow steps 2 to 4 above.
+2. Select the **Long-term API keys** tab, then **Generate long-term API keys**.
+3. Under **API key expiration**, choose the shortest period that covers the lab.
+4. Leave **Advanced permissions** as it is and select **Generate**.
+5. Copy the key. This is the only time it is shown.
+6. Continue from step 7 above.
+
+If you were handed a key instead of creating one, start at step 7 above.
+
+### 3.2 Add the Bedrock connection
 
 Bedrock exposes a chat completions endpoint, so you use the built-in **OpenAI Compatible** connection type. F5 AI Security then speaks chat completions on both sides: to your clients and to Bedrock.
 
@@ -1090,7 +1143,7 @@ Bedrock exposes a chat completions endpoint, so you use the built-in **OpenAI Co
    | --- | --- |
    | **Display name** | `bedrock-gpt-oss` (must equal `F5_CONNECTION` in `lab.env`; no spaces) |
    | **Model name** | `openai.gpt-oss-120b-1:0` (case-sensitive) |
-   | **API key** | Your Bedrock API key |
+   | **API key** | The Bedrock API key from step 3.1. Paste it from the console tab you left open. |
    | **URL** | `https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions` |
    | **Endpoint** | Chat completions (cannot be changed later) |
 
@@ -1100,7 +1153,7 @@ The platform sends the prompt "Hello there" to Bedrock. On success you see **Con
 
 > The **Display name** becomes part of the URL that clients call: `https://<F5_HOST>/openai/<Display name>`. Keep it short and lowercase.
 
-### 3.2 Create the baseline project
+### 3.3 Create the baseline project
 
 1. Select **Projects**, then **Create**.
 2. Choose **Guardrails**.
@@ -1108,16 +1161,16 @@ The platform sends the prompt "Hello there" to Bedrock. On success you see **Con
 4. Select **Create**.
 5. Leave every guardrail **off** in this project.
 
-### 3.3 Create the protected project
+### 3.4 Create the protected project
 
-1. Repeat 3.2 with **Project name** `lab-protected`.
+1. Repeat 3.3 with **Project name** `lab-protected`.
 2. Open the project and enable guardrails for **prompt injection**, **jailbreak**, and **PII** (personal data).
 3. Set the prompt injection and jailbreak guardrails to **block**.
 4. Turn on **response scanning** for the PII guardrail so model output is checked too.
 
 Guardrail names and layout differ between releases. Your instructor will show which built-in guardrails or packages map to these three categories in your version.
 
-### 3.4 Create one token per project
+### 3.5 Create one token per project
 
 1. Under **Configuration**, select **API tokens**, then **Generate API token**.
 2. **Token name:** `lab-baseline-token`. **Scope:** **Project**. **Project:** `lab-baseline`.
@@ -1174,7 +1227,7 @@ Expected:
 
 **Test 3 - see it in the logs.** In the F5 AI Security UI, open the prompt logs for each project. You should find four entries: two in `lab-baseline` marked clear, and in `lab-protected` one clear and one blocked, with the guardrail that fired.
 
-If the protected project answered the attack, the guardrail is not enabled or is set to audit instead of block. Fix it in 3.3 and rerun Test 2.
+If the protected project answered the attack, the guardrail is not enabled or is set to audit instead of block. Fix it in 3.4 and rerun Test 2.
 
 ---
 
@@ -1521,7 +1574,7 @@ After `down`, `status` must show `Environment: stopped` and `EBS volumes: none f
 
 Then:
 
-- Delete the Bedrock API key in the AWS console (**Amazon Bedrock > API keys**).
+- Bedrock API key: a short-term key expires by itself. If you used the long-term fallback, delete the key in the AWS console under **Amazon Bedrock > API keys > Long-term API keys**.
 - AWS access from step 1.4. Method 1: `aws sso logout`. Method 2: close the terminals; the keys expire by themselves. Method 3: in the AWS console go to **IAM > Users > your user > Security credentials**, and under **Access keys** choose **Actions > Deactivate**, then **Delete**.
 - Optional: remove the downloaded image with `docker image rm lobehub/lobe-chat:1.143.3`.
 - Option B: remove the line you added to `/etc/hosts` (and the Windows hosts file, if used). Option A: `down` already removed the DNS record.
@@ -1601,17 +1654,21 @@ done
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Section 1 Bedrock check returns an access or authorization error | Key expired, wrong region, or the model is not enabled for the account | Recreate the key in the right region. Check the model's page in the Bedrock model catalog. |
+| Every prompt fails in every client at once, including the baseline project | The short-term Bedrock key expired | Renew it: step 3.1, "When the key expires" |
+| The direct `curl` check in step 3.1 fails right after you create the key | Wrong region selected in the console, or the key was cut short when pasted | Create the key in the region shown by `echo $BEDROCK_REGION`, and save it again with `labvar BEDROCK_API_KEY` |
+| The step 1.6 check works but the key gets an access error | Your role lacks `bedrock:CallWithBearerToken`, or the account blocks Bedrock API keys | Give the error text to your AWS administrator, or ask for a long-term key (step 3.1, fallback) |
+| **Test and connect** rejects the key or the field cuts it off | The short-term key is too long for the field in your release | Use a long-term key (step 3.1, fallback), which is much shorter |
 | Error says the model is not supported on this route | The model is served on a different Bedrock endpoint | Try the URL `https://bedrock-mantle.<region>.api.aws/v1/chat/completions` with model `openai.gpt-oss-120b` |
 | **Test and connect** fails in F5 but the Section 1 check passes | Typo in **Model name** or **URL** | The URL must be the full path ending in `/chat/completions` |
-| `ask` prints an invalid token error | Token pasted with a space or newline, or it expired | Generate a new project token (3.4) |
+| `ask` prints an invalid token error | Token pasted with a space or newline, or it expired | Generate a new project token (3.5) |
 | `ask` returns "not found" for the connection | `F5_CONNECTION` does not match the connection's **Display name** | Make them identical |
-| Protected project does not block | Guardrail off, or set to audit | Revisit 3.3 |
+| Protected project does not block | Guardrail off, or set to audit | Revisit 3.4 |
 
 ### Section 4 - LobeChat
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
+| It worked earlier and now every message errors, in both tabs | The short-term Bedrock key expired | Renew it: step 3.1, "When the key expires". The containers do not need restarting. |
 | Every message errors immediately | Container cannot resolve, reach, or trust the F5 hostname | `docker logs lobe-protected`. Check `--add-host` (option B needs `F5_LB_IP`), that your IP is still the allowed one (2.5), and the certificate mount. |
 | Certificate errors persist in `docker logs` | The image ignores the extra CA | For this lab only, recreate the container adding `-e NODE_TLS_REJECT_UNAUTHORIZED=0`. Never do this outside a lab. |
 | Model list is empty | `OPENAI_MODEL_LIST` not applied | Recreate the container. Settings from an older container can persist in the browser, so try a private window. |
@@ -1626,6 +1683,7 @@ done
 | `ModuleNotFoundError: No module named 'dotenv'` | `python-dotenv` not installed | `pip install python-dotenv` |
 | Startup error mentioning `CONNECTION-NAME` | `CALYPSOAI_BASE_URL` not loaded | Check the `--env-file` path |
 | Run returns `{"detail":"Connection error."}` | Hostname not resolving, your IP not allowed, or certificate not trusted | Check name resolution (2.6), that your IP is still the allowed one (2.5), and `SSL_CERT_FILE` in the env file. Open a fresh terminal so no old `SSL_CERT_FILE` overrides it. |
+| It worked earlier and now every run fails, in both copies | The short-term Bedrock key expired | Renew it: step 3.1, "When the key expires". The app does not need restarting. |
 | Happy path fails with a model or tool error | The model or connection does not support forced tool calls or JSON output | See Appendix B, item 2 |
 | App works but nothing appears in F5 logs | App is in mock mode | Mock mode only activates when no token is set. Check the env file. |
 
@@ -1633,7 +1691,7 @@ done
 
 ## Appendix A - Bedrock through a custom Converse connection
 
-Use this instead of 3.1 if you must authenticate to Bedrock with IAM access keys rather than a Bedrock API key.
+Use this instead of 3.1 and 3.2 if you must authenticate to Bedrock with IAM access keys rather than a Bedrock API key.
 
 1. **Configuration > Connections > Models > Add other providers**.
 2. **Provider name:** `bedrock`. **Model display name:** `bedrock-converse` (this is the connection name).
@@ -1644,7 +1702,7 @@ Use this instead of 3.1 if you must authenticate to Bedrock with IAM access keys
 
 Then run `labvar F5_CONNECTION bedrock-converse`.
 
-With this path your clients still call F5 AI Security with chat completions, but F5 AI Security calls Bedrock with the Converse API, so the model side is no longer the same API type. This path is suitable for Sections 3 and 4. A custom connection maps a prompt to a text reply, and F5's documentation does not state that it carries OpenAI tool calls, which Section 5 depends on. Use the OpenAI Compatible connection from 3.1 for Section 5 unless you have tested otherwise.
+With this path your clients still call F5 AI Security with chat completions, but F5 AI Security calls Bedrock with the Converse API, so the model side is no longer the same API type. This path is suitable for Sections 3 and 4. A custom connection maps a prompt to a text reply, and F5's documentation does not state that it carries OpenAI tool calls, which Section 5 depends on. Use the OpenAI Compatible connection from 3.2 for Section 5 unless you have tested otherwise.
 
 Reference: <https://docs.aisecurity.f5.com/onboarding/connections/connect-model-provider.html>
 
@@ -1660,17 +1718,18 @@ Reference: <https://docs.aisecurity.f5.com/onboarding/connections/connect-model-
 
 None of the following could be tested without a licensed cluster. Run the whole guide once and correct these points.
 
-1. **Guardrail UI labels (3.3).** The connection, project, and token steps follow the public documentation. The steps for enabling guardrails inside a project are described by category because the documentation pages reviewed did not give exact labels. Replace 3.3 with the exact names for your operator version.
+1. **Guardrail UI labels (3.4).** The connection, project, and token steps follow the public documentation. The steps for enabling guardrails inside a project are described by category because the documentation pages reviewed did not give exact labels. Replace 3.4 with the exact names for your operator version.
 2. **Tool calling through the Bedrock connection (Section 5).** The app forces specific tool calls and asks for JSON output. Confirm that `openai.gpt-oss-120b-1:0` behind the OpenAI Compatible connection honors both. If it does not, pick a Bedrock model that does and update `BEDROCK_MODEL` and the connection's **Model name**.
-3. **Blocked-response shape (Sections 3-5).** The app reports `blocked` when the error body contains `error.cai_error.outcome = "blocked"`. Confirm your release returns that shape so the app shows `blocked` instead of a generic 500 error.
-4. **LobeChat (Section 4).** The containers are published on `127.0.0.1` only. If students must reach LobeChat from another machine, change the `-p` option and set LobeChat's `ACCESS_CODE`. Confirm the pinned tag `lobehub/lobe-chat:1.143.3` pulls, that `NODE_EXTRA_CA_CERTS` makes it trust the lab certificate, and that streamed replies pass through F5 AI Security. `lobehub/lobe-chat` is the v1 single-container image. The v2 image (`lobehub/lobehub`) needs PostgreSQL, Redis, and object storage and is not suitable for a short lab.
-5. **Leak scenario outcome (Check 2).** Whether the baseline answer contains the client data depends on the model following the injected text. Confirm it leaks on baseline and is stopped on protected with your guardrail set. If baseline does not leak, the lab still works as a logging comparison, but the contrast is weaker.
-6. **Operator version.** `guardrails-poc.env.example` pins `OPERATOR_CHART_VERSION="1.10.0"`. Pin the version you rehearse.
-7. **Source-address restriction (stage 8, step 2.5).** The script installs NGINX behind a Network Load Balancer with instance targets and no AWS Load Balancer Controller, and sets `loadBalancerSourceRanges` on the service when it is first created. Confirm on a live cluster that (a) the load balancer is never open to `0.0.0.0/0`, so check B is empty from the start, (b) Kubernetes writes the rules for the allowed addresses into the EKS cluster security group, so check A passes, (c) load balancer health checks pass, (d) `access` updates the rules within about a minute, and (e) rerunning `up` keeps the restriction.
-8. **Red Team placement and UI (Validate Section 2).** The pod-spread check and the **AI Red Team** menu label are inferred from the script's node selectors and the public documentation. Confirm both, and confirm the license enables Remediate.
-9. **Deployment time with Red Team.** The 35-60 minute figure is an estimate. The repository documents 25-45 minutes for Guardrails alone.
-10. **Password replacement (stage 7).** The script port-forwards to `svc/cai-moderator` port 8080 (the same service and port the ingress uses for `/auth`), signs in to the `master` realm with `admin` / `pass` through the `admin-cli` client, resets the `admin` user's password in each realm through the Keycloak admin API, and then checks that `pass` is rejected. Confirm on a live cluster that (a) the login service answers under `/auth` on that port, (b) the `master` realm `admin` user can reset passwords in the `calypsoai` realm, (c) the platform keeps working afterwards, meaning nothing inside it depends on the initial password, and (d) the generated password satisfies the realms' password policies. If any of these fails, `up` stops before creating the load balancer. `ALLOW_DEFAULT_PASSWORD="true"` lets it continue, and `KEYCLOAK_SERVICE`, `KEYCLOAK_SERVICE_PORT`, and `KEYCLOAK_BASE_PATHS` adjust where it looks.
-11. **Default-password check (Validate Section 2).** The check and the `Admin password` line in `status` post `admin` / `pass` to each realm's token endpoint and treat `HTTP 200` as "still accepted". Confirm both realms return 200 on an unprotected deployment and 401 after stage 7.
+3. **Short-term Bedrock key (steps 1.6 and 3.1).** The guide defaults to a short-term key because students cannot create IAM users. Confirm on a live account: (a) how long a console session, and so the key, lasts for your students, and whether it covers Sections 3 to 5; (b) that the OpenAI Compatible connection's **API key** field accepts a key of that length; (c) that replacing the key through **Manage model** restores service without touching projects or tokens; and (d) that the `aws bedrock-runtime converse` check in step 1.6 returns text for the chosen model. If sessions are too short, hand out long-term keys and have students use the fallback in step 3.1.
+4. **Blocked-response shape (Sections 3-5).** The app reports `blocked` when the error body contains `error.cai_error.outcome = "blocked"`. Confirm your release returns that shape so the app shows `blocked` instead of a generic 500 error.
+5. **LobeChat (Section 4).** The containers are published on `127.0.0.1` only. If students must reach LobeChat from another machine, change the `-p` option and set LobeChat's `ACCESS_CODE`. Confirm the pinned tag `lobehub/lobe-chat:1.143.3` pulls, that `NODE_EXTRA_CA_CERTS` makes it trust the lab certificate, and that streamed replies pass through F5 AI Security. `lobehub/lobe-chat` is the v1 single-container image. The v2 image (`lobehub/lobehub`) needs PostgreSQL, Redis, and object storage and is not suitable for a short lab.
+6. **Leak scenario outcome (Check 2).** Whether the baseline answer contains the client data depends on the model following the injected text. Confirm it leaks on baseline and is stopped on protected with your guardrail set. If baseline does not leak, the lab still works as a logging comparison, but the contrast is weaker.
+7. **Operator version.** `guardrails-poc.env.example` pins `OPERATOR_CHART_VERSION="1.10.0"`. Pin the version you rehearse.
+8. **Source-address restriction (stage 8, step 2.5).** The script installs NGINX behind a Network Load Balancer with instance targets and no AWS Load Balancer Controller, and sets `loadBalancerSourceRanges` on the service when it is first created. Confirm on a live cluster that (a) the load balancer is never open to `0.0.0.0/0`, so check B is empty from the start, (b) Kubernetes writes the rules for the allowed addresses into the EKS cluster security group, so check A passes, (c) load balancer health checks pass, (d) `access` updates the rules within about a minute, and (e) rerunning `up` keeps the restriction.
+9. **Red Team placement and UI (Validate Section 2).** The pod-spread check and the **AI Red Team** menu label are inferred from the script's node selectors and the public documentation. Confirm both, and confirm the license enables Remediate.
+10. **Deployment time with Red Team.** The 35-60 minute figure is an estimate. The repository documents 25-45 minutes for Guardrails alone.
+11. **Password replacement (stage 7).** The script port-forwards to `svc/cai-moderator` port 8080 (the same service and port the ingress uses for `/auth`), signs in to the `master` realm with `admin` / `pass` through the `admin-cli` client, resets the `admin` user's password in each realm through the Keycloak admin API, and then checks that `pass` is rejected. Confirm on a live cluster that (a) the login service answers under `/auth` on that port, (b) the `master` realm `admin` user can reset passwords in the `calypsoai` realm, (c) the platform keeps working afterwards, meaning nothing inside it depends on the initial password, and (d) the generated password satisfies the realms' password policies. If any of these fails, `up` stops before creating the load balancer. `ALLOW_DEFAULT_PASSWORD="true"` lets it continue, and `KEYCLOAK_SERVICE`, `KEYCLOAK_SERVICE_PORT`, and `KEYCLOAK_BASE_PATHS` adjust where it looks.
+12. **Default-password check (Validate Section 2).** The check and the `Admin password` line in `status` post `admin` / `pass` to each realm's token endpoint and treat `HTTP 200` as "still accepted". Confirm both realms return 200 on an unprotected deployment and 401 after stage 7.
 
 ### Class logistics
 
