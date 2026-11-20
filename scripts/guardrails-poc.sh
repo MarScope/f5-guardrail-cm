@@ -465,6 +465,61 @@ PY
   fi
 }
 
+# Each new cluster gets its own VPC. The default limit is 5 VPCs per region per
+# account, so a shared lab account runs out after a few students.
+check_vpc_quota() {
+  if cluster_exists; then
+    preflight_ok "Cluster $CLUSTER_NAME already exists; no new VPC is needed"
+    return
+  fi
+
+  local used quota
+  used="$(aws ec2 describe-vpcs --region "$AWS_REGION" --query 'length(Vpcs)' --output text 2>/dev/null || true)"
+  quota="$(aws service-quotas get-service-quota --region "$AWS_REGION" --service-code vpc --quota-code L-F678F1CE --query 'Quota.Value' --output text 2>/dev/null || true)"
+  quota="${quota%.*}"
+
+  if ! [[ "$used" =~ ^[0-9]+$ ]]; then
+    preflight_warn "Could not count the VPCs in $AWS_REGION; continuing because AWS will enforce the limit during cluster creation"
+    return
+  fi
+  if ! [[ "$quota" =~ ^[0-9]+$ ]]; then
+    if [[ "$used" -ge 5 ]]; then
+      preflight_warn "Could not read the VPC limit. $used VPCs exist in $AWS_REGION and the default limit is 5, so cluster creation may fail. See \"VPC limit\" in the lab guide troubleshooting."
+    else
+      preflight_ok "VPCs in $AWS_REGION: $used in use (limit not readable; the default is 5)"
+    fi
+    return
+  fi
+
+  if [[ "$used" -ge "$quota" ]]; then
+    preflight_fail "VPC limit reached in $AWS_REGION: $used of $quota in use, and this deployment creates one more. Delete an unused VPC, or raise the limit:"
+    printf '         aws service-quotas request-service-quota-increase --region %s --service-code vpc --quota-code L-F678F1CE --desired-value %s\n' "$AWS_REGION" "$((quota + 15))"
+  else
+    preflight_ok "VPC limit in $AWS_REGION: $used of $quota in use, room for this deployment"
+  fi
+}
+
+# A failed "eksctl create cluster" leaves its CloudFormation stack behind, with
+# termination protection on. A second attempt then fails with "already exists".
+check_leftover_cluster_stack() {
+  cluster_exists && return 0
+  local stack="eksctl-${CLUSTER_NAME}-cluster" status
+  status="$(aws cloudformation describe-stacks --region "$AWS_REGION" --stack-name "$stack" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || true)"
+  [[ -n "$status" && "$status" != "None" ]] || return 0
+
+  case "$status" in
+    *_IN_PROGRESS)
+      preflight_fail "CloudFormation stack $stack is $status. Wait a few minutes and run preflight again."
+      ;;
+    *)
+      preflight_fail "A stack from an earlier failed attempt is in the way: $stack ($status). Check the name is yours, then remove it with these three commands:"
+      printf '         aws cloudformation update-termination-protection --region %s --stack-name %s --no-enable-termination-protection\n' "$AWS_REGION" "$stack"
+      printf '         aws cloudformation delete-stack --region %s --stack-name %s\n' "$AWS_REGION" "$stack"
+      printf '         aws cloudformation wait stack-delete-complete --region %s --stack-name %s\n' "$AWS_REGION" "$stack"
+      ;;
+  esac
+}
+
 check_eksctl_cluster_config() {
   if cluster_exists; then
     preflight_ok "EKS cluster already exists; up will reuse it: $CLUSTER_NAME"
@@ -690,6 +745,8 @@ preflight_up() {
     check_route53_zone
     check_instance_offerings
     check_gpu_quota
+    check_vpc_quota
+    check_leftover_cluster_stack
 
     printf '\n%s\n' "$(color_text "$COLOR_BOLD" "Deployment validation")"
     check_eksctl_cluster_config

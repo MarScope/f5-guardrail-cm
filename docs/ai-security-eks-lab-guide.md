@@ -373,7 +373,8 @@ What the lab does in AWS, and the permissions behind each action:
 | Creates and removes the load balancer | Section 2, Cleanup | Elastic Load Balancing | Included in `AmazonEC2FullAccess` |
 | Reads and checks security group rules | Step 2.5 | EC2 | Included in `AmazonEC2FullAccess` |
 | Deletes leftover disks | Cleanup | EC2 | Included in `AmazonEC2FullAccess` |
-| Reads the GPU quota and requests an increase | Step 1.5 | Service Quotas | `servicequotas:GetServiceQuota`, `ListServiceQuotas`, `RequestServiceQuotaIncrease` |
+| Reads the GPU and VPC limits and requests an increase | Step 1.5, preflight | Service Quotas | `servicequotas:GetServiceQuota`, `ListServiceQuotas`, `RequestServiceQuotaIncrease` |
+| Looks up current server prices for the cost estimate (optional; built-in prices are used without it) | Step 2.3 | AWS Price List | `pricing:GetProducts` |
 | Creates a DNS record | Section 2, DNS option A only | Route 53 | `route53:ListHostedZones`, `ListHostedZonesByName`, `ListResourceRecordSets`, `ChangeResourceRecordSets`, `GetChange` |
 | Calls the Bedrock model, and creates a short-term Bedrock API key | Step 1.6, Sections 3-5 | Bedrock | `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`, `bedrock:CallWithBearerToken`, and read access to the Bedrock console. A short-term key can do only what your role can do, so your role needs these. |
 | Creates a long-term Bedrock API key | Step 3.1, fallback only | IAM | Create an IAM user, attach only `AmazonBedrockLimitedAccess` to it, and create a Bedrock service credential. Not needed if you use a short-term key. |
@@ -605,9 +606,7 @@ You are done with step 1.4. Go to step 1.5.
 AWS limits how many GPU servers an account may run. The lab needs **24 vCPUs** of the quota named "Running On-Demand G and VT instances": 16 for the Guardrails node and 8 for the Red Team node.
 
 ```bash
-aws service-quotas get-service-quota \
-  --service-code ec2 --quota-code L-DB2E81BA \
-  --region "$AWS_REGION" --query 'Quota.Value'
+aws service-quotas get-service-quota --region "$AWS_REGION" --service-code ec2 --quota-code L-DB2E81BA --query 'Quota.Value' --output text
 ```
 
 - **24 or more:** you are done with this step.
@@ -615,6 +614,18 @@ aws service-quotas get-service-quota \
 - **An `AccessDenied` error:** your role cannot read quotas. Ask your instructor whether the quota has already been checked for the account.
 
 In a shared account, every student's servers count against the same quota. The instructor needs 24 vCPUs per student.
+
+**The VPC limit.** Each deployment also creates its own private network (a VPC). AWS allows 5 VPCs per region per account by default, so a shared account runs out after a few students. Check the limit, then how many are in use:
+
+```bash
+aws service-quotas get-service-quota --region "$AWS_REGION" --service-code vpc --quota-code L-F678F1CE --query 'Quota.Value' --output text
+```
+
+```bash
+aws ec2 describe-vpcs --region "$AWS_REGION" --query 'length(Vpcs)' --output text
+```
+
+The first number must be larger than the second. In a shared account it must be larger by at least the number of students. If it is not, see "VPC limit" under [Troubleshooting](#troubleshooting). `preflight` in step 2.3 checks this again.
 
 ### 1.6 Check that you can call the Bedrock model
 
@@ -843,7 +854,7 @@ It writes `config/harbor.txt` and `config/license.txt`, readable only by you. Gi
 ./scripts/guardrails-poc.sh preflight
 ```
 
-The header must show `Red Team enabled:       true` and a `Red Team node group` line. Every check should start with `[OK]`, including one each for the Guardrails and Red Team instance types, and for option A a `Route 53 hosted zone found` line. A `[WARN]` on the GPU quota line is acceptable. Any `[FAIL]` must be fixed before you continue. The message beside it says what is wrong.
+The header must show `Red Team enabled:       true` and a `Red Team node group` line. Every check should start with `[OK]`, including one each for the Guardrails and Red Team instance types, and for option A a `Route 53 hosted zone found` line. A `[WARN]` on the GPU quota line is acceptable. A `VPC limit` line shows how many VPCs the account has in use against its limit. Any `[FAIL]` must be fixed before you continue. The message beside it says what is wrong.
 
 Look for the **Access control** block. It must show both of these:
 
@@ -862,6 +873,14 @@ Optional but useful: preview the plan without changing anything.
 ```
 
 Each line that starts with `+` is a command the real run will execute.
+
+**Estimate the cost before you deploy.** This reads your config file and prints what the deployment costs per hour and for the length of the class. It changes nothing.
+
+```bash
+./scripts/cost-estimate.sh
+```
+
+With Red Team enabled, expect roughly $4 per hour, almost all of it the two GPU servers. Add `--hours 6` for a different duration, or `--students 12` to see the total for a class. The estimate covers AWS infrastructure only. It leaves out Bedrock usage, which is billed per token and is small for this lab. The charges continue until you run the teardown in [Cleanup](#cleanup), so a deployment left running overnight costs about $100.
 
 ### 2.4 Deploy
 
@@ -1701,6 +1720,9 @@ For AWS sign-in problems, see Part C of step 1.4.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `preflight` fails on Harbor login | Wrong credentials or extra blank characters | `harbor.txt` must have the username on line 1 and the password on line 2 |
+| `preflight` fails with "VPC limit reached", or `up` fails with "The maximum number of VPCs has been reached" | The account already has as many VPCs as AWS allows in this region | See "VPC limit" below |
+| `preflight` fails with "A stack from an earlier failed attempt is in the way", or `up` fails with "AlreadyExistsException: Stack [eksctl-...-cluster] already exists" | An earlier `up` failed while creating the cluster and left its CloudFormation stack behind | See "VPC limit" below, step 4 |
+| `delete-stack` fails because "termination protection is enabled" | eksctl protects its cluster stack from deletion | Run the `update-termination-protection` command in "VPC limit" below, step 4, then delete again |
 | `up` fails creating a node group with a capacity or quota error | GPU quota below 24 vCPUs, or no `g5.4xlarge` / `g6e.2xlarge` capacity in that zone | Raise the quota (step 1.5) or rerun `up` |
 | `status` shows `Red Team: disabled` or no Red Team node group | `ENABLE_RED_TEAM` is still `false` in `guardrails-poc.env` | Set it to `true` and rerun `up`. It adds the node group to the existing cluster. |
 | A Red Team model pod stays `Pending` | The `g6e.2xlarge` node is missing or not `Ready` | `kubectl get nodes`, then `kubectl describe pod <name> -n f5-ai-sec-inference` and read **Events** |
@@ -1723,6 +1745,59 @@ For AWS sign-in problems, see Part C of step 1.4.
 | `preflight` fails on the Route 53 hosted zone | Option A: wrong `ROUTE53_ZONE_NAME` or `ROUTE53_HOSTED_ZONE_ID` | `aws route53 list-hosted-zones` and copy the right values |
 | `curl` reports a certificate error | Wrong hostname or stale certificate file | Repeat 2.8. The certificate is valid only for the exact `HOSTNAME`. |
 | Default-password check prints `HTTP 200` | The initial password is still active in that realm | Rerun `up`. If it persists, change it by hand with the links in 2.7 and tell your instructor. |
+
+#### VPC limit
+
+Each deployment creates one VPC. AWS allows 5 per region per account unless the limit has been raised. Each command below is a single line. Copy it whole, with no `\` characters.
+
+1. See the limit and how many VPCs are in use:
+
+   ```bash
+   aws service-quotas get-service-quota --region "$AWS_REGION" --service-code vpc --quota-code L-F678F1CE --query 'Quota.Value' --output text
+   ```
+
+   ```bash
+   aws ec2 describe-vpcs --region "$AWS_REGION" --query 'Vpcs[].[VpcId,IsDefault,Tags[?Key==`Name`]|[0].Value]' --output table
+   ```
+
+2. Free a slot in one of two ways.
+
+   - **Remove a deployment nobody needs.** VPCs named `eksctl-<cluster>-cluster/VPC` belong to lab clusters. Remove a whole deployment with `./scripts/guardrails-poc.sh down --yes` from its owner's machine. Do not delete another student's VPC by hand.
+   - **Raise the limit.** This request is normally approved within a few minutes:
+
+     ```bash
+     aws service-quotas request-service-quota-increase --region "$AWS_REGION" --service-code vpc --quota-code L-F678F1CE --desired-value 20
+     ```
+
+     An `AccessDenied` error means your role cannot change limits. Ask the account owner to raise "VPCs per Region" in the Service Quotas console.
+
+3. Check the request. Continue when the status is `APPROVED`:
+
+   ```bash
+   aws service-quotas list-requested-service-quota-change-history-by-quota --region "$AWS_REGION" --service-code vpc --quota-code L-F678F1CE --query 'RequestedQuotas[].[Status,DesiredValue,Created]' --output table
+   ```
+
+4. If `up` already failed once, remove the stack it left behind. Check that the name printed by the first command is your own cluster's before you run the rest:
+
+   ```bash
+   STACK="eksctl-$(grep '^CLUSTER_NAME=' config/guardrails-poc.env | cut -d'"' -f2)-cluster"; echo "$STACK"
+   ```
+
+   ```bash
+   aws cloudformation update-termination-protection --region "$AWS_REGION" --stack-name "$STACK" --no-enable-termination-protection
+   ```
+
+   ```bash
+   aws cloudformation delete-stack --region "$AWS_REGION" --stack-name "$STACK"
+   ```
+
+   ```bash
+   aws cloudformation wait stack-delete-complete --region "$AWS_REGION" --stack-name "$STACK"
+   ```
+
+   The last command prints nothing and returns when the stack is gone, usually within two minutes.
+
+5. Run `./scripts/guardrails-poc.sh preflight`, then `./scripts/guardrails-poc.sh up`.
 
 Detailed views when you need them:
 
@@ -1833,6 +1908,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 11. **Password replacement (stage 7).** The script port-forwards to `svc/cai-moderator` port 8080 (the same service and port the ingress uses for `/auth`), signs in to the `master` realm with `admin` / `pass` through the `admin-cli` client, resets the `admin` user's password in each realm through the Keycloak admin API, and then checks that `pass` is rejected. Confirm on a live cluster that (a) the login service answers under `/auth` on that port, (b) the `master` realm `admin` user can reset passwords in the `calypsoai` realm, (c) the platform keeps working afterwards, meaning nothing inside it depends on the initial password, and (d) the generated password satisfies the realms' password policies. If any of these fails, `up` stops before creating the load balancer. `ALLOW_DEFAULT_PASSWORD="true"` lets it continue, and `KEYCLOAK_SERVICE`, `KEYCLOAK_SERVICE_PORT`, and `KEYCLOAK_BASE_PATHS` adjust where it looks.
 12. **Default-password check (Validate Section 2).** The check and the `Admin password` line in `status` post `admin` / `pass` to each realm's token endpoint and treat `HTTP 200` as "still accepted". Confirm both realms return 200 on an unprotected deployment and 401 after stage 7.
 13. **Stuck model pod recovery and node disk speed.** On a live run the Red Team model pod (26 GB image) sat in `CreateContainerError` with "context deadline exceeded" and "failed to reserve container name" events. It started after the node's root volume was raised to 6000 IOPS and 500 MiB/s with `aws ec2 modify-volume` and the pod was deleted. Both were done together, so which one was needed is not known. `up` now does both: it raises every node's root volume right after the cluster and node groups exist (`TUNE_NODE_VOLUMES`, `NODE_VOLUME_IOPS`, `NODE_VOLUME_THROUGHPUT`), and it deletes a model pod that has been in that state for 5 minutes, up to 3 times. Neither step has run on a live cluster as part of the script; the pod loop was tested against simulated pod states. Confirm on a live cluster that the `Node disks:` lines report each volume raised and that model pods start without a recycle. The volume change needs `ec2:ModifyVolume` and `ec2:DescribeVolumes`, is not part of the launch template, and so does not carry over to a replacement node until `up` runs again. Moving node group creation to an eksctl config file with `volumeIOPS` and `volumeThroughput` would make it permanent.
+14. **VPC limit and leftover stack checks, and the cost estimate.** A second student in a shared account hit "The maximum number of VPCs has been reached", then "Stack already exists", then termination protection on the leftover stack. `preflight` now fails early on both conditions and prints the commands to fix them. Both checks were tested against simulated AWS responses only. Before class in a shared account, raise "VPCs per Region" to the number of students plus the VPCs already there. `scripts/cost-estimate.sh` uses built-in us-east-1 list prices recorded on 2026-11-20 unless the role has `pricing:GetProducts`; the live price lookup was tested against a simulated response only. Check the built-in prices against the AWS pricing pages before quoting a class budget.
 
 ### Class logistics
 
