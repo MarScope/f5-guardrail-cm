@@ -16,7 +16,7 @@ The PoC uses:
 - Ingress load balancer restricted to your source addresses
 - Initial admin password replaced during deployment, before the ingress exists
 
-For a step-by-step, instructor-led walkthrough (deploy, connect Amazon Bedrock, test with LobeChat and a multi-agent app), see the [AI Security - EKS Lab Guide](docs/ai-security-eks-lab-guide.md).
+For a step-by-step, instructor-led walkthrough (deploy, connect Amazon Bedrock, test with LobeChat and a multi-agent app), see the [AI Security - EKS Lab Guide](docs/ai-security-eks-lab-guide.md). The guide uses three supporting files in this repository: `config/lab.env.example` (the student's values file), `scripts/labvar` (a helper that stores values and secrets without hand-editing files), and `docs/iam/lab-scoped-policy.json` (a scoped IAM policy for the lab, not yet run end to end).
 
 Route 53 is optional. If you do not use Route 53, the script still deploys the environment and `status` shows the ingress load balancer hostname. Point your hostname at it with another DNS provider or, for a single machine, a local hosts-file entry.
 
@@ -82,7 +82,7 @@ Required local tools:
 
 Required inputs:
 
-- AWS CLI credentials with permissions for EKS, EC2, IAM, CloudFormation, ELB, and EBS, plus Route 53 if `ROUTE53_ENABLED=true`
+- AWS CLI credentials with permissions for EKS, EC2, IAM, CloudFormation, ELB, and EBS, plus Route 53 if `ROUTE53_ENABLED=true`. `AdministratorAccess` in a sandbox account is the simplest choice. For a scoped alternative, attach `AmazonEC2FullAccess`, `AWSCloudFormationFullAccess`, and a customer managed policy made from `docs/iam/lab-scoped-policy.json`. Step 1.4 of the lab guide lists what each permission is for.
 - Route 53 hosted zone for the selected hostname, only if `ROUTE53_ENABLED=true`
 - Outbound HTTPS to `checkip.amazonaws.com` so the script can detect your public IP, unless you list addresses in `ALLOWED_SOURCE_CIDRS` yourself
 - Harbor registry credentials for `harbor.calypsoai.app`

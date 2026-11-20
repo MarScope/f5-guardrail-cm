@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Stores values for the AI Security - EKS lab guide without hand-editing files.
+
+  labvar NAME VALUE          save NAME in ~/f5-ai-lab/lab.env
+  labvar NAME                same, but ask for the value without showing it (for secrets)
+  labvar --config NAME VALUE save NAME in config/guardrails-poc.env in this repository
+  labvar --f5-secrets        ask for the Harbor login and the F5 license and write
+                             config/harbor.txt and config/license.txt
+
+lab.env defines shell functions (labvar, labcfg, labsecrets) that call this script.
+"""
+import os
+import re
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+LAB_ENV = os.environ.get("LAB_ENV_FILE", os.path.join(os.path.expanduser("~"), "f5-ai-lab", "lab.env"))
+CONFIG = os.path.join(REPO, "config", "guardrails-poc.env")
+
+
+def fail(message):
+    sys.stderr.write(message + "\n")
+    sys.exit(1)
+
+
+def ask(prompt, hidden):
+    """Reads one line from the terminal. Works for pasted values of any length."""
+    try:
+        tty_in = open("/dev/tty", "rb", buffering=0)
+    except OSError:
+        tty_in = None
+    if tty_in is None or not os.isatty(tty_in.fileno()):
+        sys.stderr.write(prompt)
+        sys.stderr.flush()
+        return sys.stdin.readline().strip()
+
+    import termios
+
+    fd = tty_in.fileno()
+    saved = termios.tcgetattr(fd)
+    mode = termios.tcgetattr(fd)
+    # Turn off line buffering so long pastes are not cut short. Hide input for secrets.
+    mode[3] &= ~termios.ICANON
+    if hidden:
+        mode[3] &= ~termios.ECHO
+    mode[6][termios.VMIN] = 1
+    mode[6][termios.VTIME] = 0
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    data = bytearray()
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, mode)
+        while True:
+            byte = os.read(fd, 1)
+            if not byte or byte in (b"\n", b"\r"):
+                break
+            if byte in (b"\x7f", b"\x08"):
+                del data[-1:]
+                continue
+            data += byte
+    except KeyboardInterrupt:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        fail("\nCancelled. Nothing was changed.")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        tty_in.close()
+    if hidden:
+        sys.stderr.write("\n")
+    return data.decode("utf-8", "replace").strip()
+
+
+def quote(value):
+    for ch in ("\\", '"', "$", "`"):
+        value = value.replace(ch, "\\" + ch)
+    return '"%s"' % value
+
+
+def set_line(path, name, value, export):
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+        fail("Not a valid name: %s" % name)
+    if not value:
+        fail("No value given. Nothing was changed.")
+    if not os.path.exists(path):
+        fail("File not found: %s" % path)
+    line = "%s%s=%s" % ("export " if export else "", name, quote(value))
+    with open(path) as handle:
+        lines = handle.read().splitlines()
+    pattern = re.compile(r"^\s*(#\s*)?(export\s+)?%s=" % re.escape(name))
+    found = [i for i, text in enumerate(lines) if pattern.match(text)]
+    if found:
+        lines[found[0]] = line
+    else:
+        lines.append(line)
+    with open(path, "w") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
+def write_private(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    os.chmod(path, 0o600)
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return
+
+    if argv[0] == "--f5-secrets":
+        user = ask("Harbor user name: ", hidden=False)
+        password = ask("Harbor password (not shown): ", hidden=True)
+        license_string = ask("F5 license string (not shown): ", hidden=True)
+        if not user or not password or not license_string:
+            fail("All three values are required. Nothing was changed.")
+        write_private(os.path.join(REPO, "config", "harbor.txt"), "%s\n%s\n" % (user, password))
+        write_private(os.path.join(REPO, "config", "license.txt"), license_string + "\n")
+        print("Saved the Harbor login for user %s (password: %d characters)." % (user, len(password)))
+        print("Saved the license (%d characters)." % len(license_string))
+        return
+
+    if argv[0] == "--config":
+        if len(argv) != 3:
+            fail("usage: labcfg NAME VALUE")
+        if not os.path.exists(CONFIG):
+            fail("%s does not exist yet. Create it first:\n  cp %s.example %s" % (CONFIG, CONFIG, CONFIG))
+        set_line(CONFIG, argv[1], argv[2].strip(), export=False)
+        print("Set %s in config/guardrails-poc.env" % argv[1])
+        return
+
+    if len(argv) > 2:
+        fail("usage: labvar NAME [VALUE]   (put quotes around a value that contains spaces)")
+    name = argv[0]
+    hidden = len(argv) == 1
+    value = ask("Paste the value for %s and press Enter (not shown): " % name, hidden=True) if hidden else argv[1].strip()
+    if not os.path.exists(LAB_ENV):
+        fail("%s does not exist yet. See step 1.3 of the lab guide." % LAB_ENV)
+    set_line(LAB_ENV, name, value, export=True)
+    os.chmod(LAB_ENV, 0o600)
+    if hidden:
+        print("Saved %s (%d characters)." % (name, len(value)))
+    else:
+        print("Saved %s=%s" % (name, value))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
