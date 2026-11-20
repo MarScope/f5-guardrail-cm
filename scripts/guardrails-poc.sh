@@ -217,6 +217,10 @@ load_config() {
   KEYCLOAK_ADMIN_REALM="${KEYCLOAK_ADMIN_REALM:-master}"
   KEYCLOAK_BASE_PATHS="${KEYCLOAK_BASE_PATHS:-/auth /}"
   PASSWORD_ROTATION_ATTEMPTS="${PASSWORD_ROTATION_ATTEMPTS:-40}"
+  INFERENCE_WAIT_SECONDS="${INFERENCE_WAIT_SECONDS:-1800}"
+  RECYCLE_STUCK_INFERENCE_PODS="${RECYCLE_STUCK_INFERENCE_PODS:-true}"
+  STUCK_POD_GRACE_SECONDS="${STUCK_POD_GRACE_SECONDS:-300}"
+  STUCK_POD_MAX_RECYCLES="${STUCK_POD_MAX_RECYCLES:-3}"
   ALLOWED_CIDRS_RESOLVED=""
   ALLOWED_CIDRS_SOURCE=""
   ALLOWED_CIDRS_ERROR=""
@@ -990,7 +994,66 @@ wait_for_app() {
 
   log "Waiting for Moderator, PostgreSQL, and inference pods"
   kubectl wait --for=condition=ready pod -n "$MODERATOR_NAMESPACE" --all --timeout=900s || true
-  kubectl wait --for=condition=ready pod -n "$INFERENCE_NAMESPACE" --all --timeout=1800s || true
+  wait_for_inference_pods || true
+}
+
+# Names of inference pods with a container waiting in CreateContainerError.
+# The model images are very large (the Red Team image is about 26 GB). On a
+# busy node disk the container runtime can take longer than the kubelet's
+# request timeout to create the container. The kubelet then retries while the
+# first attempt is still running ("context deadline exceeded", "failed to
+# reserve container name") and the pod never starts. Deleting the pod lets its
+# Deployment create a fresh one; the image is already cached on the node.
+stuck_inference_pods() {
+  kubectl get pods -n "$INFERENCE_NAMESPACE" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .status.containerStatuses[*]}{.state.waiting.reason}{" "}{end}{"\n"}{end}' 2>/dev/null \
+    | awk -F'\t' '$2 ~ /CreateContainerError/ {print $1}'
+}
+
+inference_pods_all_ready() {
+  local out
+  out="$(kubectl get pods -n "$INFERENCE_NAMESPACE" \
+    -o jsonpath='{range .items[*]}{range .status.conditions[?(@.type=="Ready")]}{.status}{"\n"}{end}{end}' 2>/dev/null)" || return 1
+  [[ -n "$out" ]] && ! grep -qv '^True$' <<<"$out"
+}
+
+wait_for_inference_pods() {
+  local start now elapsed stuck_since=0 recycles=0 stuck pod
+  start="$(date +%s)"
+  while true; do
+    if inference_pods_all_ready; then
+      log "Inference pods are ready"
+      return 0
+    fi
+
+    now="$(date +%s)"
+    elapsed=$((now - start))
+    if [[ "$elapsed" -ge "$INFERENCE_WAIT_SECONDS" ]]; then
+      log "Inference pods were not all ready after ${INFERENCE_WAIT_SECONDS}s; continuing. Check: kubectl get pods -n $INFERENCE_NAMESPACE"
+      return 1
+    fi
+
+    stuck="$(stuck_inference_pods)"
+    if [[ -z "$stuck" ]]; then
+      stuck_since=0
+    elif [[ "$RECYCLE_STUCK_INFERENCE_PODS" == "true" ]]; then
+      [[ "$stuck_since" -eq 0 ]] && stuck_since="$now"
+      if [[ $((now - stuck_since)) -ge "$STUCK_POD_GRACE_SECONDS" ]]; then
+        if [[ "$recycles" -lt "$STUCK_POD_MAX_RECYCLES" ]]; then
+          recycles=$((recycles + 1))
+          for pod in $stuck; do
+            log "Pod $pod has been in CreateContainerError for ${STUCK_POD_GRACE_SECONDS}s; deleting it so it restarts (recycle $recycles/$STUCK_POD_MAX_RECYCLES)"
+            kubectl delete pod -n "$INFERENCE_NAMESPACE" "$pod" --wait=false >/dev/null 2>&1 || true
+          done
+          stuck_since=0
+        elif [[ "$recycles" -eq "$STUCK_POD_MAX_RECYCLES" ]]; then
+          recycles=$((recycles + 1))
+          log "Inference pods are still in CreateContainerError after $STUCK_POD_MAX_RECYCLES recycles; not deleting again. See the lab guide troubleshooting for Section 2."
+        fi
+      fi
+    fi
+    sleep 20
+  done
 }
 
 fix_prefect_workflows() {
