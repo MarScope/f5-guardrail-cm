@@ -16,7 +16,7 @@ The PoC uses:
 - Ingress load balancer restricted to your source addresses
 - Initial admin password replaced during deployment, before the ingress exists
 
-For a step-by-step, instructor-led walkthrough (deploy, connect Amazon Bedrock, test with LobeChat and a multi-agent app), see the [AI Security - EKS Lab Guide](docs/ai-security-eks-lab-guide.md). The guide uses three supporting files in this repository: `config/lab.env.example` (the student's values file), `scripts/labvar` (a helper that stores values and secrets without hand-editing files), and `docs/iam/lab-scoped-policy.json` (a scoped IAM policy for the lab, not yet run end to end).
+For a step-by-step, instructor-led walkthrough (deploy, connect Amazon Bedrock, test with LobeChat and a multi-agent app), see the [AI Security - EKS Lab Guide](docs/ai-security-eks-lab-guide.md). The guide uses three supporting files in this repository: `config/lab.env.example` (the student's values file), `scripts/labvar` with `scripts/lab-helpers.sh` (helper commands that store values and secrets without hand-editing files), and `docs/iam/lab-scoped-policy.json` (a scoped IAM policy for the lab, not yet run end to end).
 
 Route 53 is optional. If you do not use Route 53, the script still deploys the environment and `status` shows the ingress load balancer hostname. Point your hostname at it with another DNS provider or, for a single machine, a local hosts-file entry.
 
