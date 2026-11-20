@@ -1,0 +1,161 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EksAll",
+      "Effect": "Allow",
+      "Action": "eks:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EksctlAmiLookup",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": [
+        "arn:aws:ssm:*:ACCOUNT_ID:parameter/aws/*",
+        "arn:aws:ssm:*::parameter/aws/*"
+      ]
+    },
+    {
+      "Sid": "EksctlKmsAndLogs",
+      "Effect": "Allow",
+      "Action": ["kms:CreateGrant", "kms:DescribeKey", "logs:PutRetentionPolicy"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EksctlIamForClusterRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:GetRole",
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:AttachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:AddRoleToInstanceProfile",
+        "iam:ListInstanceProfilesForRole",
+        "iam:PassRole",
+        "iam:DetachRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:GetOpenIDConnectProvider",
+        "iam:CreateOpenIDConnectProvider",
+        "iam:DeleteOpenIDConnectProvider",
+        "iam:TagOpenIDConnectProvider",
+        "iam:ListAttachedRolePolicies",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:GetPolicy",
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:ListPolicyVersions"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:instance-profile/eksctl-*",
+        "arn:aws:iam::ACCOUNT_ID:role/eksctl-*",
+        "arn:aws:iam::ACCOUNT_ID:policy/eksctl-*",
+        "arn:aws:iam::ACCOUNT_ID:oidc-provider/*",
+        "arn:aws:iam::ACCOUNT_ID:role/aws-service-role/eks-nodegroup.amazonaws.com/AWSServiceRoleForAmazonEKSNodegroup",
+        "arn:aws:iam::ACCOUNT_ID:role/eksctl-managed-*"
+      ]
+    },
+    {
+      "Sid": "EksctlIamRead",
+      "Effect": "Allow",
+      "Action": ["iam:GetRole", "iam:GetUser"],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/*",
+        "arn:aws:iam::ACCOUNT_ID:user/*"
+      ]
+    },
+    {
+      "Sid": "EksctlServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": [
+            "eks.amazonaws.com",
+            "eks-nodegroup.amazonaws.com",
+            "eks-fargate.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "LabGpuQuotaCheck",
+      "Effect": "Allow",
+      "Action": [
+        "servicequotas:GetServiceQuota",
+        "servicequotas:ListServiceQuotas",
+        "servicequotas:RequestServiceQuotaIncrease"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LabRoute53DnsOptionA",
+      "Effect": "Allow",
+      "Action": [
+        "route53:ListHostedZones",
+        "route53:ListHostedZonesByName",
+        "route53:ListResourceRecordSets",
+        "route53:ChangeResourceRecordSets",
+        "route53:GetChange"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LabBedrockConsoleAndModelUse",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:Get*",
+        "bedrock:List*",
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:CallWithBearerToken"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LabBedrockApiKeyUser",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateUser",
+        "iam:DeleteUser",
+        "iam:ListUsers",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListServiceSpecificCredentials",
+        "iam:UpdateServiceSpecificCredential",
+        "iam:DeleteServiceSpecificCredential"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LabBedrockApiKeyCreate",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceSpecificCredential",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:user/*",
+      "Condition": {
+        "StringEquals": {
+          "iam:ServiceSpecificCredentialServiceName": "bedrock.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "LabBedrockApiKeyPolicyOnly",
+      "Effect": "Allow",
+      "Action": ["iam:AttachUserPolicy", "iam:DetachUserPolicy"],
+      "Resource": "arn:aws:iam::ACCOUNT_ID:user/*",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/AmazonBedrockLimitedAccess"
+        }
+      }
+    }
+  ]
+}

@@ -210,41 +210,53 @@ How to read the `STATUS` column of `docker ps -a`:
 
 ## Section 1 - Gather the prerequisites
 
-**Goal:** have every credential, tool, and download ready before you touch the cluster. The deployment takes 25-45 minutes, so a missing prerequisite found late is expensive.
+**Goal:** have every tool, credential, and download ready before you touch the cluster. The deployment takes up to an hour, so a missing prerequisite found late is expensive.
 
-### 1.1 Use a supported shell
+Work through the steps in order. Each one finishes before the next begins, and you do not need to come back to an earlier step.
 
-The automation is a Bash script.
+| Step | What you do | What you have at the end |
+| --- | --- | --- |
+| 1.1 | Open the right kind of terminal | A Bash prompt |
+| 1.2 | Install the tools and Docker | Working `aws`, `kubectl`, `helm`, `eksctl`, `docker` |
+| 1.3 | Download the lab material | A lab folder, both repositories, the LobeChat image, and your `lab.env` file |
+| 1.4 | Sign the command line in to AWS | `aws` commands that run as you, in the lab account |
+| 1.5 | Check the GPU quota | Confirmation that AWS will let you start the GPU servers |
+| 1.6 | Create a Bedrock API key | A key saved in `lab.env` |
+| 1.7 | Get the F5 items from your instructor | Harbor login and license string, in hand |
 
-- **macOS and Linux:** use the built-in terminal.
-- **Windows:** use WSL2 with Ubuntu and run every command in this guide inside WSL. Install Docker Desktop and turn on its WSL integration.
+Treat every credential in this section like a password. Do not paste any of them into chat, email, tickets, or screenshots, and do not commit them to git.
 
-### 1.2 Create a working folder
+### 1.1 Open a Bash terminal
 
-Everything for the lab lives in one folder.
+Every command in this guide is written for the Bash shell.
+
+- **Linux:** open a terminal. It already runs Bash.
+- **macOS:** open **Terminal**. It runs a different shell (zsh) by default, and some lab commands fail in it. Type `bash` and press Enter. Your prompt changes to something like `bash-3.2$`. **Do this in every new terminal window you open during the lab.**
+- **Windows:** install WSL2 with Ubuntu, open the **Ubuntu** app, and run every command in this guide there.
+
+Check:
 
 ```bash
-mkdir -p ~/f5-ai-lab && cd ~/f5-ai-lab
+echo "$BASH_VERSION"
 ```
 
-### 1.3 Know what you need to collect
+It must print a version number. If it prints an empty line, you are not in Bash.
 
-You need four credentials. The steps that follow show how to get each one.
+### 1.2 Install the command-line tools and Docker
 
-| # | Item | How you get it | Step | Used in |
-| --- | --- | --- | --- | --- |
-| 1 | AWS access for the command line | You set it up yourself | 1.5 | Section 2 |
-| 2 | Harbor registry username and password for `harbor.calypsoai.app` | Your instructor gives them to you | 2.2 | Section 2 |
-| 3 | F5 AI Security license string that covers **Guardrails and Red Team** | Your instructor gives it to you | 2.2 | Section 2 |
-| 4 | Amazon Bedrock API key | You create it yourself | 1.7 | Section 3 |
+You need these tools. The script in Section 2 checks for the first seven.
 
-Remediate needs no license of its own. It comes with Red Team.
-
-Treat all four like passwords. Do not paste them into chat, email, tickets, or screenshots, and do not commit them to git.
-
-### 1.4 Install the command-line tools and Docker
-
-The script checks for seven tools: `aws`, `kubectl`, `helm`, `eksctl`, `openssl`, `python3`, and `curl`. You also need `git` and Docker.
+| Tool | What it is for |
+| --- | --- |
+| `aws` | Talks to your AWS account |
+| `eksctl` | Creates the Kubernetes cluster |
+| `kubectl` | Talks to the Kubernetes cluster |
+| `helm` | Installs software into the cluster |
+| `openssl` | Creates the lab's TLS certificate |
+| `python3` (3.10 or newer) | Runs helper code and the Section 5 app |
+| `curl` | Sends test requests |
+| `git` | Downloads the lab material |
+| `docker` | Runs LobeChat in Section 4 |
 
 **macOS** with [Homebrew](https://brew.sh):
 
@@ -261,208 +273,380 @@ brew install --cask docker
 - eksctl: <https://eksctl.io/installation/>
 - Docker: <https://docs.docker.com/get-started/get-docker/>
 
-Python must be 3.10 or newer for Section 5.
+**Start Docker.**
 
-**Get Docker running.**
-
-1. Start Docker.
-   - **macOS:** open **Docker** from Applications and wait until the whale icon in the menu bar stops animating.
-   - **Windows:** open **Docker Desktop**. Under **Settings > Resources > WSL integration**, turn on your Ubuntu distribution. Run `docker` commands inside WSL.
-   - **Linux:** `sudo systemctl enable --now docker`, then `sudo usermod -aG docker $USER` and log out and back in so you can run `docker` without `sudo`.
-2. Test it:
-
-   ```bash
-   docker run --rm hello-world
-   ```
-
-   You should see `Hello from Docker!`. This downloads a tiny test image, runs it once, and removes it.
+- **macOS:** open **Docker** from Applications and wait until the whale icon in the menu bar stops animating.
+- **Windows:** open **Docker Desktop**. Under **Settings > Resources > WSL integration**, turn on your Ubuntu distribution.
+- **Linux:** run `sudo systemctl enable --now docker`, then `sudo usermod -aG docker $USER`, then log out and back in so you can run `docker` without `sudo`.
 
 > **Docker Desktop licensing:** Docker Desktop needs a paid subscription for use at larger companies. Check your company's policy before installing it. Rancher Desktop and Colima are alternatives that provide the same `docker` command, and every `docker` command in this guide works with them.
 
-### 1.5 Get AWS access for the command line
-
-The script creates AWS resources on your behalf, so the `aws` command on your laptop must be signed in to an AWS account.
-
-**What the account must allow:** managing EKS, EC2 (including security group rules), IAM, CloudFormation, Elastic Load Balancing, and EBS, plus Route 53 if you use DNS option A (see 2.1). An administrator role in a sandbox account is the simplest choice. Do not use a production account.
-
-**Pick one method.** If you sign in to AWS through a company portal, use method 1. If you are unsure, ask your instructor.
-
-| | Method 1 - single sign-on | Method 2 - temporary keys from the portal | Method 3 - IAM user access key |
-| --- | --- | --- | --- |
-| Use when | Your company uses an AWS access portal (IAM Identity Center) | Same, and you want the quickest route | You have an IAM user in a personal or sandbox account |
-| Credentials last | Hours, renewed with one command | Hours, then you copy new ones | Until you delete them |
-| Works in new terminals | Yes, through `AWS_PROFILE` | No. Paste again in each terminal. | Yes |
-| Risk if leaked | Low. They expire. | Low. They expire. | High. They do not expire. |
-
-#### Method 1 - single sign-on (recommended)
-
-1. Get two values from your AWS access portal or your administrator: the **start URL** (it looks like `https://<something>.awsapps.com/start`) and the **SSO region**.
-2. Run the setup and answer the prompts:
-
-   ```bash
-   aws configure sso
-   ```
-
-   | Prompt | Answer |
-   | --- | --- |
-   | SSO session name | `f5-ai-lab` |
-   | SSO start URL | The start URL from step 1 |
-   | SSO region | The SSO region from step 1 |
-   | SSO registration scopes | Press Enter to accept the default |
-   | (browser opens) | Sign in and approve the request |
-   | Account and role | Choose the lab account and a role with the permissions listed above |
-   | CLI default client Region | `us-east-1`, unless your instructor says otherwise |
-   | CLI default output format | `json` |
-   | CLI profile name | `f5-ai-lab` |
-
-3. Tell every tool to use that profile. You add this line to `lab.env` in step 1.8, so for now just run it:
-
-   ```bash
-   export AWS_PROFILE=f5-ai-lab
-   ```
-
-4. When the session expires, commands fail with a message about an expired token. Sign in again and carry on:
-
-   ```bash
-   aws sso login --profile f5-ai-lab
-   ```
-
-   The deployment in Section 2 takes up to an hour. Run `aws sso login` just before you start it. If the session still expires partway through, sign in again and rerun `up`. It continues where it stopped.
-
-#### Method 2 - temporary keys from the access portal
-
-1. Sign in to your AWS access portal in a browser.
-2. Find the lab account, expand it, and select **Access keys** beside the role you will use.
-3. Under the option for setting environment variables, copy the three `export` lines.
-4. Paste them into your terminal. They set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
-5. Set the region:
-
-   ```bash
-   export AWS_DEFAULT_REGION=us-east-1
-   ```
-
-These keys exist only in the terminal where you pasted them, and they expire. In each new terminal, and whenever you see an expired-token error, copy fresh keys from the portal. Do not save them in `lab.env`.
-
-#### Method 3 - IAM user access key
-
-Many company accounts do not allow this. If the console refuses any step, use method 1 or B.
-
-1. Sign in to the AWS console and open **IAM**.
-2. Select **Users**, then your user name. If you have no user and are allowed to create one, select **Create user**, give it a name, choose **Attach policies directly**, and attach a policy that grants the permissions listed above.
-3. Open the **Security credentials** tab.
-4. Under **Access keys**, select **Create access key**.
-5. For the use case choose **Command Line Interface (CLI)**, tick the confirmation box, and select **Next**.
-6. Optionally add a description such as `f5-ai-lab`, then select **Create access key**.
-7. Select **Download .csv file**. This is the only time the secret access key is shown.
-8. Store both values in the AWS CLI:
-
-   ```bash
-   aws configure
-   ```
-
-   Enter the access key ID, the secret access key, the region (`us-east-1` unless your instructor says otherwise), and `json` for the output format.
-
-9. Delete the downloaded `.csv` file. The CLI now holds the key in `~/.aws/credentials`.
-
-An access key of this kind works until it is deleted. You delete it in [Cleanup](#cleanup).
-
-Reference: <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html>
-
-#### Check that it worked
+**Check.** Every tool must say `OK`, and the last command must print `Hello from Docker!`.
 
 ```bash
-aws sts get-caller-identity
+for t in aws eksctl kubectl helm openssl python3 curl git docker; do
+  printf '%-8s ' "$t"; command -v "$t" >/dev/null && echo OK || echo MISSING
+done
+docker run --rm hello-world
 ```
 
-It prints your account number and the identity you are signed in as. Confirm the account number is the lab account before you go on.
+### 1.3 Download the lab material and create your values file
 
-### 1.6 Check the GPU quota
-
-AWS limits how many GPU instances an account can run. The lab needs **24 vCPUs** of "Running On-Demand G and VT instances": 16 for the Guardrails node and 8 for the Red Team node.
+**Step 1 - create the lab folder and download both repositories.**
 
 ```bash
-aws service-quotas get-service-quota \
-  --service-code ec2 --quota-code L-DB2E81BA \
-  --region us-east-1 --query 'Quota.Value'
+mkdir -p ~/f5-ai-lab && cd ~/f5-ai-lab
+git clone https://github.com/MarScope/f5-guardrail-cm.git
+git clone https://github.com/f5devcentral/f5-ai-sec-multi-agent-system-app.git
 ```
 
-If the number is below 24, request an increase in the AWS console under **Service Quotas > Amazon EC2 > Running On-Demand G and VT instances**. Approval can take hours, so do this well before class.
+The first repository is a fork of the original automation at <https://github.com/yalmashad/f5-guardrail>. The fork adds this guide and two safeguards in the script: it restricts the load balancer to your IP address and replaces the initial admin password during deployment. The second is the multi-agent app for Section 5.
 
-### 1.7 Create an Amazon Bedrock API key
-
-1. Open the AWS console and go to **Amazon Bedrock** in the same region you will use for the model (`us-east-1`).
-2. In the left menu, select **API keys**.
-3. Generate a **long-term** key. Choose the shortest expiry that covers the lab.
-4. Copy the key. You cannot view it again.
-
-Reference: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html>
-
-### 1.8 Create your lab variables file
-
-You will reuse a handful of values in every section. Keeping them in one file avoids copy-and-paste mistakes.
-
-```bash
-cat > ~/f5-ai-lab/lab.env <<'EOF'
-# --- Section 1 ---
-# AWS method 1 (single sign-on) only: remove the leading "# " from the next line.
-# export AWS_PROFILE="f5-ai-lab"
-export BEDROCK_REGION="us-east-1"
-export BEDROCK_MODEL="openai.gpt-oss-120b-1:0"
-export BEDROCK_API_KEY="PASTE-YOUR-BEDROCK-API-KEY"
-
-# --- Section 2 ---
-export AWS_REGION="us-east-1"                    # must match AWS_REGION in guardrails-poc.env
-export CLUSTER_NAME="f5-guardrails-CHANGEME"     # must match CLUSTER_NAME in guardrails-poc.env
-export F5_HOST="guardrails.ailab.test"          # must match HOSTNAME in guardrails-poc.env (see DNS options in 2.1)
-export F5_CA="$HOME/f5-ai-lab/guardrails-lab.crt"
-
-# --- Section 3 ---
-export F5_CONNECTION="bedrock-gpt-oss"
-export F5_BASELINE_TOKEN="FILL-IN-SECTION-3"
-export F5_PROTECTED_TOKEN="FILL-IN-SECTION-3"
-EOF
-chmod 600 ~/f5-ai-lab/lab.env
-```
-
-Edit the file: paste your Bedrock API key, replace `CHANGEME` in `CLUSTER_NAME` with your initials, and if you used AWS method 1 (single sign-on) in 1.5, uncomment the `AWS_PROFILE` line. Then load it. **Run this `source` command again in every new terminal window.**
-
-```bash
-source ~/f5-ai-lab/lab.env
-```
-
-### 1.9 Download the lab material
-
-Download ("pull") the LobeChat image now so you are not waiting on it later. This lab uses the single-container (v1) image, which needs no database. Nothing runs yet. You start the containers in Section 4.
+**Step 2 - download the LobeChat image.** This lab uses the single-container (v1) image, which needs no database. Nothing runs yet. You start the containers in Section 4.
 
 ```bash
 docker pull lobehub/lobe-chat:1.143.3
 ```
 
-Clone the two repositories. The first is a fork of the original automation at <https://github.com/yalmashad/f5-guardrail>. The fork adds this guide and two safeguards in the script: it restricts the load balancer to your IP address and replaces the initial admin password during deployment.
+**Step 3 - create your values file.** The lab reuses a handful of values, such as your cluster name and API keys, in every section. They live in one file, `~/f5-ai-lab/lab.env`, so you never retype them.
 
 ```bash
-cd ~/f5-ai-lab
-git clone https://github.com/MarScope/f5-guardrail-cm.git
-git clone https://github.com/f5devcentral/f5-ai-sec-multi-agent-system-app.git
+cp ~/f5-ai-lab/f5-guardrail-cm/config/lab.env.example ~/f5-ai-lab/lab.env
+chmod 600 ~/f5-ai-lab/lab.env
+source ~/f5-ai-lab/lab.env
 ```
+
+> **Remember this one command.** Run `source ~/f5-ai-lab/lab.env` in every new terminal window, right after `bash` on macOS. It loads your values and prints a warning if you forgot to start Bash.
+
+**Step 4 - give your cluster a unique name.** Loading the file gave you a command called `labvar`. It saves a value in the file and reloads it, so you never edit the file by hand. Replace `xy` with your initials:
+
+```bash
+labvar CLUSTER_NAME f5-guardrails-xy
+```
+
+You will use `labvar` again each time a step produces a value. To save a secret, give only the name, `labvar NAME`, and paste the value when asked. It is not shown on screen and does not end up in your command history.
+
+**Check.**
+
+```bash
+ls ~/f5-ai-lab
+echo "Cluster: $CLUSTER_NAME   Region: $AWS_REGION"
+docker image ls lobehub/lobe-chat
+```
+
+You should see both repository folders and `lab.env`, your cluster name with your initials, and one image row with tag `1.143.3`.
+
+### 1.4 Sign the command line in to AWS
+
+The script creates AWS resources on your behalf, so the `aws` command on your laptop must be signed in to the lab's AWS account with enough permissions. This step has three parts: confirm the permissions, sign in using the method that matches your account, and check the result.
+
+Use a sandbox or lab account. Do not use a production account.
+
+#### Part A - The permissions the lab needs
+
+Your AWS sign-in is tied to a **role** (or, for an IAM user, a set of attached policies) that decides what you may do. An AWS administrator sets that up. You cannot grant these to yourself. Before class, confirm with your instructor or AWS administrator that your role has one of the two sets below.
+
+**Set 1 - simplest: administrator access.** The AWS managed policy `AdministratorAccess`. Use this in a dedicated sandbox account. It is the configuration the lab is expected to run under.
+
+**Set 2 - scoped: only what the lab uses.** Three policies attached together:
+
+| Policy | Type | Covers |
+| --- | --- | --- |
+| `AmazonEC2FullAccess` | AWS managed | Servers, networking, security groups, disks, load balancers, auto scaling |
+| `AWSCloudFormationFullAccess` | AWS managed | The stacks `eksctl` uses to build and delete the cluster |
+| [`docs/iam/lab-scoped-policy.json`](iam/lab-scoped-policy.json) | Customer managed. Your administrator creates it from that file after replacing `ACCOUNT_ID` with the 12-digit account number. | Everything else in the table below |
+
+What the lab does in AWS, and the permissions behind each action:
+
+| The lab does this | When | AWS service | Permissions |
+| --- | --- | --- | --- |
+| Creates and deletes the Kubernetes cluster, node groups, and add-ons | Section 2, Cleanup | EKS | `eks:*` |
+| Builds the network, GPU servers, disks, and security groups | Section 2 | EC2, Auto Scaling | `AmazonEC2FullAccess` |
+| Runs the build as CloudFormation stacks | Section 2, Cleanup | CloudFormation | `AWSCloudFormationFullAccess` |
+| Creates the roles the cluster and nodes run as | Section 2 | IAM | Create, tag, attach, pass, and delete roles, policies, and instance profiles whose names start with `eksctl-`; create the EKS service-linked roles |
+| Looks up the server image for the nodes | Section 2 | Systems Manager | `ssm:GetParameter`, `ssm:GetParameters` on `/aws/*` |
+| Creates and removes the load balancer | Section 2, Cleanup | Elastic Load Balancing | Included in `AmazonEC2FullAccess` |
+| Reads and checks security group rules | Step 2.5 | EC2 | Included in `AmazonEC2FullAccess` |
+| Deletes leftover disks | Cleanup | EC2 | Included in `AmazonEC2FullAccess` |
+| Reads the GPU quota and requests an increase | Step 1.5 | Service Quotas | `servicequotas:GetServiceQuota`, `ListServiceQuotas`, `RequestServiceQuotaIncrease` |
+| Creates a DNS record | Section 2, DNS option A only | Route 53 | `route53:ListHostedZones`, `ListHostedZonesByName`, `ListResourceRecordSets`, `ChangeResourceRecordSets`, `GetChange` |
+| Creates a long-term Bedrock API key | Step 1.6 | IAM, Bedrock | Create an IAM user, attach only `AmazonBedrockLimitedAccess` to it, and create a Bedrock service credential; open the Bedrock console |
+| Calls the Bedrock model | Sections 1 and 3-5 | Bedrock | Granted to the API key itself by `AmazonBedrockLimitedAccess`, not to your role |
+
+Notes on set 2:
+
+- The policy file combines the minimum policies that the `eksctl` documentation publishes with the extra calls this lab makes. It has not been run end to end. If a step fails with `AccessDenied`, the error names the missing action. Add it, or fall back to set 1.
+- If your administrator hands out Bedrock API keys instead of letting students create them, the three `LabBedrockApiKey...` statements in the file can be removed.
+- Reference for the `eksctl` policies: <https://docs.aws.amazon.com/eks/latest/eksctl/minimum-iam-policies.html>
+
+> **Use one AWS identity for the whole lab.** Only the identity that creates the cluster can run `kubectl` against it. If you create the cluster with one role and come back with another, `kubectl` and the script are refused.
+
+#### Part B - Sign in
+
+How do you normally open the AWS console in a browser? Your answer picks the method. Follow that one method from start to finish and skip the others.
+
+| You start at... | Use |
+| --- | --- |
+| A company page that lists AWS accounts and roles. The address usually contains `awsapps.com/start`, or it is your company's own single sign-on page. | **Method 1** |
+| The same kind of page, but your company blocks the `aws configure sso` command | **Method 2** |
+| The AWS sign-in page, where you type an account ID or alias, a user name, and a password | **Method 3** |
+| You have no AWS access yet | Stop and ask your instructor. Nothing in this guide creates an AWS account. |
+
+##### Method 1 - single sign-on (recommended)
+
+You sign in once in a browser, and the command line receives credentials that renew themselves for the length of your session.
+
+1. In a browser, open your company's AWS access portal and sign in.
+2. Select the **Accounts** tab. Find the lab account and select it to expand it. The roles you may use in that account are listed under it.
+3. Beside the role you will use for the lab, select **Access keys**. A **Get credentials** dialog opens.
+4. In the dialog, find the heading **AWS IAM Identity Center credentials (Recommended)**. Copy the two values shown there into a note:
+   - **SSO start URL**, which looks like `https://d-1234567890.awsapps.com/start`
+   - **SSO Region**, which looks like `us-east-1`
+
+   Also note the **account number** (12 digits) and the **role name** from step 2. Close the dialog.
+5. In your terminal, start the setup:
+
+   ```bash
+   aws configure sso
+   ```
+
+6. Answer each prompt as shown. Text after the colon is what you type.
+
+   ```text
+   SSO session name (Recommended): f5-ai-lab
+   SSO start URL [None]: <paste the SSO start URL>
+   SSO region [None]: <paste the SSO Region>
+   SSO registration scopes [sso:account:access]: <press Enter>
+   ```
+
+7. A browser tab opens and asks you to allow access. Approve it, then return to the terminal. If no browser opens, the terminal prints an address and a code. Open the address and type the code.
+8. The terminal lists the accounts you can use. Move with the arrow keys to the lab account and press Enter. Then choose the role the same way. If you have only one account or one role, it is selected for you and the list is skipped.
+9. Answer the last three prompts:
+
+   ```text
+   CLI default client Region [None]: us-east-1
+   CLI default output format [None]: json
+   CLI profile name [...]: f5-ai-lab
+   ```
+
+   Use the region your instructor gave you if it is not `us-east-1`. Type the profile name exactly. Do not accept the long default.
+10. Save the profile name so every lab terminal uses it:
+
+    ```bash
+    labvar AWS_PROFILE f5-ai-lab
+    ```
+
+11. Check that it worked:
+
+    ```bash
+    aws sts get-caller-identity
+    ```
+
+    Expected output, with your own values:
+
+    ```text
+    {
+        "UserId": "AROA...:you@example.com",
+        "Account": "123456789012",
+        "Arn": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_<role name>_.../you@example.com"
+    }
+    ```
+
+    Confirm that `Account` is the lab account number you noted and that the role name appears in `Arn`.
+
+**When your session expires.** Sessions last from one to twelve hours, set by your company. When one ends, commands fail with a message about an expired or invalid token. Sign in again with one command and carry on where you were:
+
+```bash
+aws sso login --profile f5-ai-lab
+```
+
+Run this just before you start the deployment in Section 2, so the session does not run out in the middle. If it does anyway, sign in again and rerun the same command. The script continues where it stopped.
+
+You are done with step 1.4. Go to step 1.5.
+
+##### Method 2 - temporary keys copied from the access portal
+
+Use this only if method 1 is blocked. The keys work only in the terminal where you paste them, and they expire.
+
+1. In a browser, open your company's AWS access portal and sign in.
+2. Select the **Accounts** tab, find the lab account, and select it to expand it.
+3. Beside the role you will use, select **Access keys**. A **Get credentials** dialog opens.
+4. Select the tab for your system: **macOS and Linux** (also correct for WSL).
+5. Under **Option 1: Set AWS environment variables**, select the copy icon. This copies three lines that begin with `export AWS_ACCESS_KEY_ID`, `export AWS_SECRET_ACCESS_KEY`, and `export AWS_SESSION_TOKEN`.
+6. Paste into your terminal and press Enter.
+7. Check that it worked:
+
+   ```bash
+   aws sts get-caller-identity
+   ```
+
+   Confirm that `Account` is the lab account number and that your role name appears in `Arn`.
+
+What to expect with this method:
+
+- **Every new terminal starts signed out.** The lab uses several terminals. In each one, after `source ~/f5-ai-lab/lab.env`, repeat steps 3 to 6.
+- **The keys expire**, usually within one to twelve hours. When commands fail with an expired-token message, repeat steps 3 to 6 to get fresh keys.
+- **Do not save these keys** in `lab.env` or anywhere else. They would be stale within hours.
+- **Leave `AWS_PROFILE` unset.** Do not run the `labvar AWS_PROFILE` command from method 1.
+
+You are done with step 1.4. Go to step 1.5.
+
+##### Method 3 - an IAM user's access key
+
+An access key of this kind keeps working until someone deletes it, so it is the riskiest of the three. Many company accounts do not allow it. If the console refuses a step, ask your administrator, or use method 1.
+
+First, the IAM user must exist and have the permissions from Part A. If you already sign in to the console as an IAM user with those permissions, skip to "Create the access key".
+
+**Create the IAM user (done by an administrator).**
+
+1. Sign in to the AWS console and type `IAM` in the search bar at the top. Open **IAM**.
+2. In the left menu select **Users**, then **Create user**.
+3. Enter a **User name**, for example `f5-ai-lab-<initials>`. Leave console access unticked unless the student also needs the console. Select **Next**.
+4. Select **Attach policies directly**. Tick the policies from Part A: either `AdministratorAccess`, or the three policies in set 2. Select **Next**, then **Create user**.
+
+**Create the access key.**
+
+1. In the AWS console, open **IAM**, select **Users** in the left menu, and select the user's name.
+2. Select the **Security credentials** tab.
+3. Scroll to the **Access keys** section and select **Create access key**.
+4. Under **Use case**, select **Command Line Interface (CLI)**. Tick the confirmation box at the bottom and select **Next**.
+5. In **Description tag value**, type `f5-ai-lab`. Select **Create access key**.
+6. The page now shows the **Access key** and, after you select **Show**, the **Secret access key**. Keep this page open. This is the only time the secret is shown.
+
+**Give the key to the command line.**
+
+1. In your terminal, run:
+
+   ```bash
+   aws configure
+   ```
+
+2. Answer the four prompts, copying the first two values from the console page:
+
+   ```text
+   AWS Access Key ID [None]: <paste the Access key>
+   AWS Secret Access Key [None]: <paste the Secret access key>
+   Default region name [None]: us-east-1
+   Default output format [None]: json
+   ```
+
+   Use the region your instructor gave you if it is not `us-east-1`.
+3. Back in the console, select **Done**. Do not download the `.csv` file. The command line has stored the key in `~/.aws/credentials`, and a second copy on disk is one more thing to leak.
+4. Check that it worked:
+
+   ```bash
+   aws sts get-caller-identity
+   ```
+
+   Expected output, with your own values:
+
+   ```text
+   {
+       "UserId": "AIDA...",
+       "Account": "123456789012",
+       "Arn": "arn:aws:iam::123456789012:user/f5-ai-lab-xy"
+   }
+   ```
+
+   Confirm that `Account` is the lab account number and that `Arn` ends with your user name.
+
+This key works in every terminal and does not expire. Leave `AWS_PROFILE` unset. You delete the key in [Cleanup](#cleanup).
+
+You are done with step 1.4. Go to step 1.5.
+
+#### Part C - If the check failed
+
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| `Unable to locate credentials` | The command line is not signed in | Method 1: run `source ~/f5-ai-lab/lab.env`, then `aws sso login --profile f5-ai-lab`. Method 2: paste the keys again. Method 3: run `aws configure` again. |
+| A message about an expired or invalid token | Your session ended | Method 1: `aws sso login --profile f5-ai-lab`. Method 2: copy fresh keys from the portal. |
+| The wrong `Account` number | Another sign-in is taking priority | Run `env | grep '^AWS_'`. Remove anything you did not set in this step with `unset NAME`, or open a new terminal. |
+| `InvalidClientTokenId` or `SignatureDoesNotMatch` | The access key or secret was pasted incorrectly | Method 3: run `aws configure` again and paste carefully, with no spaces |
+
+### 1.5 Check the GPU quota
+
+AWS limits how many GPU servers an account may run. The lab needs **24 vCPUs** of the quota named "Running On-Demand G and VT instances": 16 for the Guardrails node and 8 for the Red Team node.
+
+```bash
+aws service-quotas get-service-quota \
+  --service-code ec2 --quota-code L-DB2E81BA \
+  --region "$AWS_REGION" --query 'Quota.Value'
+```
+
+- **24 or more:** you are done with this step.
+- **Less than 24:** request an increase. In the AWS console, type `Service Quotas` in the search bar and open it. Select **AWS services**, then **Amazon Elastic Compute Cloud (Amazon EC2)**. Search for `Running On-Demand G and VT instances`, select it, and choose **Request increase at account level**. Enter `24` (or more if the account is shared) and submit. Approval can take hours, so do this well before class.
+- **An `AccessDenied` error:** your role cannot read quotas. Ask your instructor whether the quota has already been checked for the account.
+
+In a shared account, every student's servers count against the same quota. The instructor needs 24 vCPUs per student.
+
+### 1.6 Create an Amazon Bedrock API key
+
+F5 AI Security uses this key to call the model on Amazon Bedrock. Create a **long-term** key. A short-term key stops working when your console session ends, at most 12 hours later, which can break the lab partway through.
+
+1. Sign in to the AWS console. In the region selector at the top right, choose the region you will use for the model (`us-east-1` unless your instructor says otherwise). The key works only in the region where you create it.
+2. Type `Bedrock` in the search bar and open **Amazon Bedrock**.
+3. In the left menu, select **API keys**.
+4. Select the **Long-term API keys** tab, then **Generate long-term API keys**.
+5. Under **API key expiration**, choose the shortest period that covers the lab.
+6. Leave **Advanced permissions** as it is and select **Generate**.
+7. Copy the key. This is the only time it is shown.
+8. In your terminal, save it. The command asks you to paste the key and does not display it:
+
+   ```bash
+   labvar BEDROCK_API_KEY
+   ```
+
+9. Check that the key and the model work:
+
+   ```bash
+   curl -sS "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions" \
+     -H "Authorization: Bearer ${BEDROCK_API_KEY}" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"'"${BEDROCK_MODEL}"'","messages":[{"role":"user","content":"Say hello in five words."}]}' \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
+   ```
+
+   It should print a short greeting from the model.
+
+If step 4 fails with a permissions error, your role may not create IAM users, which a long-term key requires. Ask your instructor for a key, then continue from step 8.
+
+If you chose a region other than `us-east-1`, also run `labvar BEDROCK_REGION <region>`.
+
+Reference: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-generate.html>
+
+### 1.7 Get the F5 items from your instructor
+
+Two items come from F5 and cannot be created by you. Have both in hand before Section 2. You store them in step 2.2.
+
+| Item | What it looks like | What it is for |
+| --- | --- | --- |
+| Harbor registry login for `harbor.calypsoai.app` | A user name and a password | Lets the cluster download the F5 AI Security software |
+| F5 AI Security license | One long string | Activates the product. It must cover **Guardrails and Red Team**. Remediate comes with Red Team and needs no license of its own. |
 
 ### Validate Section 1
 
-Run each check. Every one must succeed.
+Open a **new** terminal to prove that everything survives a fresh start. On macOS type `bash` first. Then run:
 
 ```bash
-# 1. Tools are installed (each line prints a version)
-for t in aws kubectl helm eksctl openssl python3 curl git docker; do
+source ~/f5-ai-lab/lab.env
+
+# 1. Tools are installed (every line says OK)
+for t in aws eksctl kubectl helm openssl python3 curl git docker; do
   printf '%-8s ' "$t"; command -v "$t" >/dev/null && echo OK || echo MISSING
 done
 
-# 2. AWS credentials work (prints your account number and identity)
+# 2. You are signed in to the lab AWS account (prints your account number and identity)
 aws sts get-caller-identity
 
 # 3. Docker is running and the image is present (one row, tag 1.143.3)
 docker image ls lobehub/lobe-chat
 
-# 4. The Bedrock key and model work (prints a short greeting from the model)
+# 4. Your values are set (no line may show CHANGEME or NOT-SET)
+echo "Cluster: $CLUSTER_NAME"
+echo "Region:  $AWS_REGION"
+echo "Bedrock key: ${BEDROCK_API_KEY:0:6}... (${#BEDROCK_API_KEY} characters)"
+
+# 5. The Bedrock key and model work (prints a short greeting)
 curl -sS "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions" \
   -H "Authorization: Bearer ${BEDROCK_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -470,7 +654,11 @@ curl -sS "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
 ```
 
-Check 4 proves Bedrock works on its own. If a later section fails, you will know the problem is not the model.
+If check 2 fails in the new terminal and you use method 2, that is expected: paste fresh keys from the portal, as described in step 1.4.
+
+Check 5 proves Bedrock works on its own. If a later section fails, you will know the problem is not the model.
+
+You also need the Harbor login and the license string from step 1.7 before you continue.
 
 ---
 
@@ -478,71 +666,96 @@ Check 4 proves Bedrock works on its own. If a later section fails, you will know
 
 **Goal:** a running F5 AI Security platform that you can log in to.
 
-You run one script, `scripts/guardrails-poc.sh`, with four actions:
+Start in a terminal where you have run `source ~/f5-ai-lab/lab.env` and, with AWS method 1, `aws sso login --profile f5-ai-lab`.
+
+You run one script, `scripts/guardrails-poc.sh`, with these actions:
 
 | Action | What it does |
 | --- | --- |
 | `preflight` | Checks tools, credentials, quota, and configuration. Changes nothing. |
 | `up` | Builds everything. Safe to run again if it stops partway. |
 | `status` | Prints a health summary. |
+| `access` | Re-applies the allowed IP addresses, for example after your IP changes. |
 | `down --yes` | Deletes everything. |
 
 ### 2.1 Create your configuration
 
+The script reads its settings from `config/guardrails-poc.env`. You create that file from the example and set a few values with the `labcfg` command, which works like `labvar` but writes to the script's configuration. You do not need an editor.
+
+**Step 1 - create the file and set the values every student needs.**
+
 ```bash
+source ~/f5-ai-lab/lab.env
 cd ~/f5-ai-lab/f5-guardrail-cm
 cp config/guardrails-poc.env.example config/guardrails-poc.env
+
+labcfg AWS_REGION "$AWS_REGION"
+labcfg CLUSTER_NAME "$CLUSTER_NAME"
+labcfg ENABLE_RED_TEAM true
 ```
 
-Open `config/guardrails-poc.env` in an editor and review these lines. Leave everything else alone.
-
-| Setting | Set it to | Why |
+| Setting | Value | Why |
 | --- | --- | --- |
-| `AWS_REGION` | The same value as `AWS_REGION` in `lab.env` | Where the cluster is built |
-| `CLUSTER_NAME` | The same value as `CLUSTER_NAME` in `lab.env` | Must be unique if the class shares one AWS account |
-| `HOSTNAME` | The same value as `F5_HOST` in `lab.env` | The name you will type in the browser |
-| `ROUTE53_ENABLED` | `true` for DNS option A, `false` for option B | See the two options below |
-| `ENABLE_RED_TEAM` | `true` | Deploys AI Red Team (and with it Remediate) on a second GPU node. The example file ships with `false`, so you must change it. |
-| `ALLOWED_SOURCE_CIDRS` | `auto` (the default) | Who may reach the platform. `auto` is your own public IP address, detected when the script runs. To also let your instructor in, add their address: `"auto 203.0.113.10"`. |
-| `ROTATE_DEFAULT_PASSWORD` | `true` (the default) | The script replaces the initial password during deployment |
-| `OPERATOR_CHART_VERSION` | The version your instructor rehearsed | Keeps the whole class on one release |
+| `AWS_REGION` | From `lab.env` | Where the cluster is built |
+| `CLUSTER_NAME` | From `lab.env` | Must be unique if the class shares one AWS account |
+| `ENABLE_RED_TEAM` | `true` | Deploys AI Red Team (and with it Remediate) on a second GPU node. The example file ships with `false`. |
 
-Choose how your hostname will resolve. Your instructor tells you which option the class uses.
+**Step 2 - choose how your hostname will resolve, and set it.** Your instructor tells you which option the class uses. Run the commands for that option only.
 
 | | Option A - Route 53 | Option B - local hosts file |
 | --- | --- | --- |
-| Use when | You have a Route 53 hosted zone in this AWS account | You have no hosted zone |
-| `ROUTE53_ENABLED` | `"true"` | `"false"` |
-| `ROUTE53_ZONE_NAME` | Your zone, for example `lab.example.com` | Ignored |
-| `ROUTE53_HOSTED_ZONE_ID` | The zone's ID. Replace the value in the example file, which belongs to someone else's zone. | Ignored |
-| `HOSTNAME` and `F5_HOST` | A unique name inside the zone, for example `guardrails-<initials>.lab.example.com` | Any name, for example `guardrails.ailab.test` |
+| Use when | The class has a Route 53 hosted zone in this AWS account | There is no hosted zone |
 | Who creates the DNS record | The script, during `up`. `down` removes it. | You, in step 2.6 |
-| Works from | Any machine | Only machines where you edit the hosts file |
+| Works from | Any machine | Only machines where you add a hosts-file entry |
 
-Confirm your settings before you go on:
+Option A. Your instructor gives you three values: a hostname for you, the zone name, and the hosted zone ID. Replace the three example values:
 
 ```bash
-grep -E '^(AWS_REGION|CLUSTER_NAME|HOSTNAME|ROUTE53_|ENABLE_RED_TEAM|RESTRICT_INGRESS_SOURCE|ALLOWED_SOURCE_CIDRS|ROTATE_DEFAULT_PASSWORD)' config/guardrails-poc.env
+labvar F5_HOST guardrails-xy.lab.example.com
+labcfg HOSTNAME "$F5_HOST"
+labcfg ROUTE53_ENABLED true
+labcfg ROUTE53_ZONE_NAME lab.example.com
+labcfg ROUTE53_HOSTED_ZONE_ID Z0123456789EXAMPLE
 ```
+
+Option B. The hostname can be any name, because it will exist only on your laptop. The default in `lab.env` is fine:
+
+```bash
+labcfg HOSTNAME "$F5_HOST"
+labcfg ROUTE53_ENABLED false
+```
+
+**Step 3 - only if your instructor asks.**
+
+```bash
+# Let a second address reach your platform, for example your instructor's
+labcfg ALLOWED_SOURCE_CIDRS "auto 203.0.113.10"
+
+# Use a specific product release
+labcfg OPERATOR_CHART_VERSION 1.10.0
+```
+
+Two safeguards are on by default and need no setting: `ALLOWED_SOURCE_CIDRS="auto"` limits access to your own public IP address, and `ROTATE_DEFAULT_PASSWORD="true"` makes the script replace the initial password during deployment.
+
+**Check.**
+
+```bash
+grep -E '^(AWS_REGION|CLUSTER_NAME|HOSTNAME|ROUTE53_ENABLED|ROUTE53_ZONE_NAME|ROUTE53_HOSTED_ZONE_ID|ENABLE_RED_TEAM|ALLOWED_SOURCE_CIDRS|ROTATE_DEFAULT_PASSWORD)=' config/guardrails-poc.env
+```
+
+Confirm that `CLUSTER_NAME` has your initials, `HOSTNAME` is your hostname, `ENABLE_RED_TEAM` is `"true"`, and `ROUTE53_ENABLED` matches your option. With option B the two `ROUTE53_ZONE` lines still show the example author's zone. That is harmless, because they are ignored when Route 53 is off.
 
 ### 2.2 Add the F5 secrets
 
-Create two files. Git ignores both, so they will not be committed.
+Have the Harbor user name, Harbor password, and license string from step 1.7 ready. Run one command and answer its three questions. The password and license are not shown as you paste them.
 
 ```bash
-# Harbor: username on line 1, password on line 2
-cat > config/harbor.txt <<'EOF'
-PASTE-HARBOR-USERNAME
-PASTE-HARBOR-PASSWORD
-EOF
-
-# License: the whole file is the license string
-cat > config/license.txt <<'EOF'
-PASTE-LICENSE-STRING
-EOF
-
-chmod 600 config/harbor.txt config/license.txt
+labsecrets
 ```
+
+It writes `config/harbor.txt` and `config/license.txt`, readable only by you. Git ignores both files, so they cannot be committed by accident.
+
+**Check.** The command reports the user name and the length of the other two values. If a length looks wrong, for example a license of only a few characters, run `labsecrets` again.
 
 ### 2.3 Run preflight
 
@@ -707,11 +920,10 @@ The hostname exists only on your laptop, so you add it to your hosts file.
 
    If the second command fails, the load balancer is still registering. Wait two minutes and retry.
 
-2. Save the IP address in `lab.env`. Section 4 needs it for the containers.
+2. Save the IP address. Section 4 needs it for the containers. Replace `1.2.3.4` with the address printed above:
 
    ```bash
-   echo "export F5_LB_IP=\"PASTE-THE-IP\"" >> ~/f5-ai-lab/lab.env
-   source ~/f5-ai-lab/lab.env
+   labvar F5_LB_IP 1.2.3.4
    ```
 
 3. Add the hosts entry.
@@ -878,10 +1090,11 @@ Guardrail names and layout differ between releases. Your instructor will show wh
 3. Select **Save** and copy the token. You cannot view it again.
 4. Repeat for `lab-protected` with the name `lab-protected-token`.
 
-Paste both tokens into `~/f5-ai-lab/lab.env` as `F5_BASELINE_TOKEN` and `F5_PROTECTED_TOKEN`, then reload:
+Save each token as soon as you copy it, before generating the next one. Each command asks you to paste and does not display the token:
 
 ```bash
-source ~/f5-ai-lab/lab.env
+labvar F5_BASELINE_TOKEN
+labvar F5_PROTECTED_TOKEN
 ```
 
 ### Validate Section 3
@@ -1275,7 +1488,7 @@ After `down`, `status` must show `Environment: stopped` and `EBS volumes: none f
 Then:
 
 - Delete the Bedrock API key in the AWS console (**Amazon Bedrock > API keys**).
-- AWS access from 1.5. Method 1: `aws sso logout`. Method 2: close the terminals; the keys expire by themselves. Method 3: in the AWS console go to **IAM > Users > your user > Security credentials**, and under **Access keys** choose **Actions > Deactivate**, then **Delete**.
+- AWS access from step 1.4. Method 1: `aws sso logout`. Method 2: close the terminals; the keys expire by themselves. Method 3: in the AWS console go to **IAM > Users > your user > Security credentials**, and under **Access keys** choose **Actions > Deactivate**, then **Delete**.
 - Optional: remove the downloaded image with `docker image rm lobehub/lobe-chat:1.143.3`.
 - Option B: remove the line you added to `/etc/hosts` (and the Windows hosts file, if used). Option A: `down` already removed the DNS record.
 - Delete `~/f5-ai-lab/lab.env`, `config/harbor.txt`, `config/license.txt`, the `.secrets/` folder in `f5-guardrail-cm`, and the `.env.*` files. They hold secrets.
@@ -1286,15 +1499,17 @@ Then:
 
 ### Section 1 - prerequisites
 
+For AWS sign-in problems, see Part C of step 1.4.
+
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `Unable to locate credentials` | The AWS CLI is not signed in, or `AWS_PROFILE` is not set in this terminal | `source ~/f5-ai-lab/lab.env` (method 1), paste fresh keys (method 2), or `aws configure` (method 3) |
-| `ExpiredToken` or "token has expired" | Method 1 or 2 credentials ran out | Method 1: `aws sso login --profile f5-ai-lab`. Method 2: copy fresh keys from the portal. |
-| `aws sts get-caller-identity` shows the wrong account | Another profile or old environment variables are active | `env | grep '^AWS_'` to see what is set. Unset what you do not want, or open a new terminal. |
-| `AccessDenied` or `UnauthorizedOperation` during preflight or `up` | The role lacks a permission the lab needs | Ask for a role with the permissions listed in 1.5 |
-| `Cannot connect to the Docker daemon` | Docker is not running | Start Docker (1.4) and wait for it to finish starting |
+| `labvar: command not found` | `lab.env` is not loaded in this terminal | `source ~/f5-ai-lab/lab.env` |
+| Pasted commands print `command not found: #` or behave oddly on macOS | The terminal is running zsh, not Bash | Type `bash`, then `source ~/f5-ai-lab/lab.env` |
+| `kubectl` says you must be logged in, or `Unauthorized`, after the cluster exists | You are signed in to AWS as a different identity than the one that created the cluster | Sign in with the same method and role you used for `up` |
+| `AccessDenied` or `UnauthorizedOperation` during preflight or `up` | The role lacks a permission the lab needs | The error names the missing action. Ask for a role with the permissions in step 1.4, Part A. |
+| `Cannot connect to the Docker daemon` | Docker is not running | Start Docker (step 1.2) and wait for it to finish starting |
 | `permission denied` on `/var/run/docker.sock` (Linux) | Your user is not in the `docker` group | `sudo usermod -aG docker $USER`, then log out and back in |
-| `docker pull` fails with "manifest unknown" or "not found" | The image tag is not available | Ask your instructor which tag to use, and use the same tag in 1.9 and 4.1 |
+| `docker pull` fails with "manifest unknown" or "not found" | The image tag is not available | Ask your instructor which tag to use, and use the same tag in steps 1.3 and 4.1 |
 | `docker pull` times out | A proxy or VPN is blocking Docker Hub | Try off VPN, or configure the proxy in Docker's settings |
 
 ### Section 2 - deployment
@@ -1302,7 +1517,7 @@ Then:
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `preflight` fails on Harbor login | Wrong credentials or extra blank characters | `harbor.txt` must have the username on line 1 and the password on line 2 |
-| `up` fails creating a node group with a capacity or quota error | GPU quota below 24 vCPUs, or no `g5.4xlarge` / `g6e.2xlarge` capacity in that zone | Raise the quota (1.6) or rerun `up` |
+| `up` fails creating a node group with a capacity or quota error | GPU quota below 24 vCPUs, or no `g5.4xlarge` / `g6e.2xlarge` capacity in that zone | Raise the quota (step 1.5) or rerun `up` |
 | `status` shows `Red Team: disabled` or no Red Team node group | `ENABLE_RED_TEAM` is still `false` in `guardrails-poc.env` | Set it to `true` and rerun `up`. It adds the node group to the existing cluster. |
 | A Red Team model pod stays `Pending` | The `g6e.2xlarge` node is missing or not `Ready` | `kubectl get nodes`, then `kubectl describe pod <name> -n f5-ai-sec-inference` and read **Events** |
 | `up` stops or your terminal closes | Any | Run `./scripts/guardrails-poc.sh up` again. It resumes. |
@@ -1393,7 +1608,7 @@ Use this instead of 3.1 if you must authenticate to Bedrock with IAM access keys
 5. Back on **Connection settings**, set **Authentication type** to **AWS Sig V4** and fill in **Access Key**, **Secret Key**, **Service name** (`bedrock`), and **AWS Region**.
 6. Select **Test and connect**.
 
-Then set `F5_CONNECTION="bedrock-converse"` in `lab.env`.
+Then run `labvar F5_CONNECTION bedrock-converse`.
 
 With this path your clients still call F5 AI Security with chat completions, but F5 AI Security calls Bedrock with the Converse API, so the model side is no longer the same API type. This path is suitable for Sections 3 and 4. A custom connection maps a prompt to a text reply, and F5's documentation does not state that it carries OpenAI tool calls, which Section 5 depends on. Use the OpenAI Compatible connection from 3.1 for Section 5 unless you have tested otherwise.
 
@@ -1425,7 +1640,10 @@ None of the following could be tested without a licensed cluster. Run the whole 
 
 ### Class logistics
 
-- **AWS access (1.5):** tell students before class which method to use and, for method 1, hand out the start URL, SSO region, account, and role name. The console and portal labels in 1.5 follow AWS's documentation and were not re-checked against a live console.
+- **AWS access (step 1.4):** before class, make sure every student's role has one of the two permission sets in Part A, and tell them which sign-in method to use. For method 1, hand out the portal address, account number, and role name. The console, portal, and `aws configure sso` prompt wording in 1.4 follows AWS's documentation and was not re-checked against a live console.
+- **Scoped permissions (step 1.4, set 2):** `docs/iam/lab-scoped-policy.json` combines the `eksctl` minimum policies with the extra calls this lab makes. It has not been run end to end. Rehearse with it once before relying on it, or use `AdministratorAccess` in a sandbox account.
+- **Shell (step 1.1):** the commands assume Bash. On macOS the default shell is zsh, where pasted comment lines and some function definitions fail, so the guide has students type `bash` first and `lab.env` warns when they forget.
+- **Helper commands:** `labvar`, `labcfg`, and `labsecrets` come from `scripts/labvar` and are defined in `lab.env`. Hidden input was tested on Linux with pasted values of several thousand characters. It was not tested on macOS.
 - **Shared AWS account:** give each student a unique `CLUSTER_NAME`, and confirm the G and VT quota covers 24 vCPUs per student.
 - **DNS:** decide before class whether students use Route 53 (option A) or a hosts file (option B). For option A, hand out the zone name, the hosted zone ID, and one hostname per student. The example config contains a hosted zone ID from the original author's account, which must be replaced.
 - **Pre-building:** `up` reuses an existing cluster and node groups. To save 20-30 minutes of class time, create both beforehand with the `eksctl` commands in the README's manual reference, then have students run `up`.
