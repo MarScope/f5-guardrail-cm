@@ -13,6 +13,7 @@ Hands-on lab: deploy F5 AI Security (Guardrails) on Amazon EKS, connect it to a 
 
 - [What you will build](#what-you-will-build)
 - [Kubernetes in five minutes](#kubernetes-in-five-minutes)
+- [Docker in five minutes](#docker-in-five-minutes)
 - [Section 1 - Gather the prerequisites](#section-1---gather-the-prerequisites)
 - [Section 2 - Deploy F5 AI Security on EKS](#section-2---deploy-f5-ai-security-on-eks)
 - [Section 3 - Configure Bedrock and connect it to F5 AI Security](#section-3---configure-bedrock-and-connect-it-to-f5-ai-security)
@@ -169,6 +170,42 @@ How to read `kubectl get pods`:
 | `ImagePullBackOff`, `ErrImagePull` | Cannot download the image | Check Harbor credentials |
 | `CrashLoopBackOff` | Starts, crashes, restarts | Read `kubectl logs` |
 
+## Docker in five minutes
+
+Docker runs an application in a self-contained package on your laptop, so you do not have to install the application itself. You use it in Section 4 to run LobeChat.
+
+| Term | Plain meaning | In this lab |
+| --- | --- | --- |
+| Image | A packaged application that you download once | `lobehub/lobe-chat:1.143.3` |
+| Tag | The version of an image, after the colon | `1.143.3` |
+| Container | One running copy of an image | `lobe-protected` and `lobe-baseline`, both from the same image |
+| Port mapping (`-p`) | Connects a port on your laptop to a port inside the container | `localhost:3210` and `localhost:3211` |
+| Environment variable (`-e`) | A setting handed to the container when it is created | The F5 URL and project token |
+| Volume (`-v`) | A file or folder on your laptop made visible inside the container | The lab certificate |
+
+Settings are fixed when a container is created. To change one, you remove the container and create it again. The commands in Section 4 do that for you.
+
+The only `docker` commands you need:
+
+```bash
+docker ps                               # Which containers are running?
+docker ps -a                            # Include stopped ones
+docker logs lobe-protected --tail 30    # What did this container print?
+docker stop lobe-protected              # Stop it. Its settings are kept.
+docker start lobe-protected             # Start it again
+docker rm -f lobe-protected             # Remove it completely
+docker image ls                         # Which images are downloaded?
+```
+
+How to read the `STATUS` column of `docker ps -a`:
+
+| STATUS | Meaning | Action |
+| --- | --- | --- |
+| `Up 5 minutes` | Running | None |
+| `Exited (0)` | Stopped normally | `docker start <name>` |
+| `Exited (1)` or another number | Crashed | Read `docker logs <name>` |
+| `Restarting` | Crashing in a loop | Read `docker logs <name>` |
+
 ---
 
 ## Section 1 - Gather the prerequisites
@@ -190,33 +227,33 @@ Everything for the lab lives in one folder.
 mkdir -p ~/f5-ai-lab && cd ~/f5-ai-lab
 ```
 
-### 1.3 Collect the credentials
+### 1.3 Know what you need to collect
 
-You need four things. Your instructor supplies the two F5 items.
+You need four credentials. The steps that follow show how to get each one.
 
-| # | Item | Where it comes from | Used in |
-| --- | --- | --- | --- |
-| 1 | AWS access key ID and secret access key | Your AWS account (IAM user or SSO) | Section 2 |
-| 2 | Harbor registry username and password for `harbor.calypsoai.app` | Instructor / F5 | Section 2 |
-| 3 | F5 AI Security license string that covers **Guardrails and Red Team** | Instructor / F5 | Section 2 |
-| 4 | Amazon Bedrock API key | You create it in step 1.7 | Section 3 |
+| # | Item | How you get it | Step | Used in |
+| --- | --- | --- | --- | --- |
+| 1 | AWS access for the command line | You set it up yourself | 1.5 | Section 2 |
+| 2 | Harbor registry username and password for `harbor.calypsoai.app` | Your instructor gives them to you | 2.2 | Section 2 |
+| 3 | F5 AI Security license string that covers **Guardrails and Red Team** | Your instructor gives it to you | 2.2 | Section 2 |
+| 4 | Amazon Bedrock API key | You create it yourself | 1.7 | Section 3 |
 
 Remediate needs no license of its own. It comes with Red Team.
 
-The AWS identity needs permission to manage EKS, EC2 (including security group rules), IAM, CloudFormation, Elastic Load Balancing, and EBS, plus Route 53 if you use DNS option A. An administrator role in a sandbox account is the simplest choice.
+Treat all four like passwords. Do not paste them into chat, email, tickets, or screenshots, and do not commit them to git.
 
-### 1.4 Install the command-line tools
+### 1.4 Install the command-line tools and Docker
 
 The script checks for seven tools: `aws`, `kubectl`, `helm`, `eksctl`, `openssl`, `python3`, and `curl`. You also need `git` and Docker.
 
-macOS with Homebrew:
+**macOS** with [Homebrew](https://brew.sh):
 
 ```bash
 brew install awscli kubectl helm eksctl openssl python git
-brew install --cask docker     # Docker Desktop. Start it once after installing.
+brew install --cask docker
 ```
 
-Linux and WSL2: install each tool from its official instructions.
+**Linux and WSL2:** install each tool from its official instructions.
 
 - AWS CLI v2: <https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html>
 - kubectl: <https://kubernetes.io/docs/tasks/tools/>
@@ -226,13 +263,118 @@ Linux and WSL2: install each tool from its official instructions.
 
 Python must be 3.10 or newer for Section 5.
 
-### 1.5 Configure AWS access
+**Get Docker running.**
+
+1. Start Docker.
+   - **macOS:** open **Docker** from Applications and wait until the whale icon in the menu bar stops animating.
+   - **Windows:** open **Docker Desktop**. Under **Settings > Resources > WSL integration**, turn on your Ubuntu distribution. Run `docker` commands inside WSL.
+   - **Linux:** `sudo systemctl enable --now docker`, then `sudo usermod -aG docker $USER` and log out and back in so you can run `docker` without `sudo`.
+2. Test it:
+
+   ```bash
+   docker run --rm hello-world
+   ```
+
+   You should see `Hello from Docker!`. This downloads a tiny test image, runs it once, and removes it.
+
+> **Docker Desktop licensing:** Docker Desktop needs a paid subscription for use at larger companies. Check your company's policy before installing it. Rancher Desktop and Colima are alternatives that provide the same `docker` command, and every `docker` command in this guide works with them.
+
+### 1.5 Get AWS access for the command line
+
+The script creates AWS resources on your behalf, so the `aws` command on your laptop must be signed in to an AWS account.
+
+**What the account must allow:** managing EKS, EC2 (including security group rules), IAM, CloudFormation, Elastic Load Balancing, and EBS, plus Route 53 if you use DNS option A (see 2.1). An administrator role in a sandbox account is the simplest choice. Do not use a production account.
+
+**Pick one method.** If you sign in to AWS through a company portal, use method 1. If you are unsure, ask your instructor.
+
+| | Method 1 - single sign-on | Method 2 - temporary keys from the portal | Method 3 - IAM user access key |
+| --- | --- | --- | --- |
+| Use when | Your company uses an AWS access portal (IAM Identity Center) | Same, and you want the quickest route | You have an IAM user in a personal or sandbox account |
+| Credentials last | Hours, renewed with one command | Hours, then you copy new ones | Until you delete them |
+| Works in new terminals | Yes, through `AWS_PROFILE` | No. Paste again in each terminal. | Yes |
+| Risk if leaked | Low. They expire. | Low. They expire. | High. They do not expire. |
+
+#### Method 1 - single sign-on (recommended)
+
+1. Get two values from your AWS access portal or your administrator: the **start URL** (it looks like `https://<something>.awsapps.com/start`) and the **SSO region**.
+2. Run the setup and answer the prompts:
+
+   ```bash
+   aws configure sso
+   ```
+
+   | Prompt | Answer |
+   | --- | --- |
+   | SSO session name | `f5-ai-lab` |
+   | SSO start URL | The start URL from step 1 |
+   | SSO region | The SSO region from step 1 |
+   | SSO registration scopes | Press Enter to accept the default |
+   | (browser opens) | Sign in and approve the request |
+   | Account and role | Choose the lab account and a role with the permissions listed above |
+   | CLI default client Region | `us-east-1`, unless your instructor says otherwise |
+   | CLI default output format | `json` |
+   | CLI profile name | `f5-ai-lab` |
+
+3. Tell every tool to use that profile. You add this line to `lab.env` in step 1.8, so for now just run it:
+
+   ```bash
+   export AWS_PROFILE=f5-ai-lab
+   ```
+
+4. When the session expires, commands fail with a message about an expired token. Sign in again and carry on:
+
+   ```bash
+   aws sso login --profile f5-ai-lab
+   ```
+
+   The deployment in Section 2 takes up to an hour. Run `aws sso login` just before you start it. If the session still expires partway through, sign in again and rerun `up`. It continues where it stopped.
+
+#### Method 2 - temporary keys from the access portal
+
+1. Sign in to your AWS access portal in a browser.
+2. Find the lab account, expand it, and select **Access keys** beside the role you will use.
+3. Under the option for setting environment variables, copy the three `export` lines.
+4. Paste them into your terminal. They set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
+5. Set the region:
+
+   ```bash
+   export AWS_DEFAULT_REGION=us-east-1
+   ```
+
+These keys exist only in the terminal where you pasted them, and they expire. In each new terminal, and whenever you see an expired-token error, copy fresh keys from the portal. Do not save them in `lab.env`.
+
+#### Method 3 - IAM user access key
+
+Many company accounts do not allow this. If the console refuses any step, use method 1 or B.
+
+1. Sign in to the AWS console and open **IAM**.
+2. Select **Users**, then your user name. If you have no user and are allowed to create one, select **Create user**, give it a name, choose **Attach policies directly**, and attach a policy that grants the permissions listed above.
+3. Open the **Security credentials** tab.
+4. Under **Access keys**, select **Create access key**.
+5. For the use case choose **Command Line Interface (CLI)**, tick the confirmation box, and select **Next**.
+6. Optionally add a description such as `f5-ai-lab`, then select **Create access key**.
+7. Select **Download .csv file**. This is the only time the secret access key is shown.
+8. Store both values in the AWS CLI:
+
+   ```bash
+   aws configure
+   ```
+
+   Enter the access key ID, the secret access key, the region (`us-east-1` unless your instructor says otherwise), and `json` for the output format.
+
+9. Delete the downloaded `.csv` file. The CLI now holds the key in `~/.aws/credentials`.
+
+An access key of this kind works until it is deleted. You delete it in [Cleanup](#cleanup).
+
+Reference: <https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html>
+
+#### Check that it worked
 
 ```bash
-aws configure
+aws sts get-caller-identity
 ```
 
-Enter the access key ID, the secret access key, the region (`us-east-1` unless your instructor says otherwise), and `json` for the output format.
+It prints your account number and the identity you are signed in as. Confirm the account number is the lab account before you go on.
 
 ### 1.6 Check the GPU quota
 
@@ -262,6 +404,8 @@ You will reuse a handful of values in every section. Keeping them in one file av
 ```bash
 cat > ~/f5-ai-lab/lab.env <<'EOF'
 # --- Section 1 ---
+# AWS method 1 (single sign-on) only: remove the leading "# " from the next line.
+# export AWS_PROFILE="f5-ai-lab"
 export BEDROCK_REGION="us-east-1"
 export BEDROCK_MODEL="openai.gpt-oss-120b-1:0"
 export BEDROCK_API_KEY="PASTE-YOUR-BEDROCK-API-KEY"
@@ -280,7 +424,7 @@ EOF
 chmod 600 ~/f5-ai-lab/lab.env
 ```
 
-Edit the file: paste your Bedrock API key and replace `CHANGEME` in `CLUSTER_NAME` with your initials. Then load it. **Run this `source` command again in every new terminal window.**
+Edit the file: paste your Bedrock API key, replace `CHANGEME` in `CLUSTER_NAME` with your initials, and if you used AWS method 1 (single sign-on) in 1.5, uncomment the `AWS_PROFILE` line. Then load it. **Run this `source` command again in every new terminal window.**
 
 ```bash
 source ~/f5-ai-lab/lab.env
@@ -288,7 +432,7 @@ source ~/f5-ai-lab/lab.env
 
 ### 1.9 Download the lab material
 
-Pull the LobeChat image now so you are not waiting on it later. This lab uses the single-container (v1) image, which needs no database.
+Download ("pull") the LobeChat image now so you are not waiting on it later. This lab uses the single-container (v1) image, which needs no database. Nothing runs yet. You start the containers in Section 4.
 
 ```bash
 docker pull lobehub/lobe-chat:1.143.3
@@ -315,7 +459,7 @@ done
 # 2. AWS credentials work (prints your account number and identity)
 aws sts get-caller-identity
 
-# 3. Docker is running and the image is present
+# 3. Docker is running and the image is present (one row, tag 1.143.3)
 docker image ls lobehub/lobe-chat
 
 # 4. The Bedrock key and model work (prints a short greeting from the model)
@@ -805,7 +949,7 @@ source ~/f5-ai-lab/lab.env
 
 start_lobe() {  # usage: start_lobe <name> <port> <token> <label>
   docker rm -f "$1" 2>/dev/null
-  docker run -d --name "$1" -p "$2:3210" \
+  docker run -d --name "$1" -p "127.0.0.1:$2:3210" \
     -e OPENAI_API_KEY="$3" \
     -e OPENAI_PROXY_URL="https://$F5_HOST/openai/$F5_CONNECTION" \
     -e OPENAI_MODEL_LIST="-all,+${BEDROCK_MODEL}=$4" \
@@ -819,17 +963,64 @@ start_lobe lobe-protected 3210 "$F5_PROTECTED_TOKEN" "Bedrock with Guardrails"
 start_lobe lobe-baseline  3211 "$F5_BASELINE_TOKEN"  "Bedrock baseline"
 ```
 
+Each `start_lobe` line prints a long container ID. That means the container was created.
+
 What each option does:
 
 | Option | Purpose |
 | --- | --- |
+| `-d` | Runs the container in the background so you get your terminal back |
+| `--name` | Gives the container a name you can use in other `docker` commands |
+| `-p 127.0.0.1:<port>:3210` | Makes LobeChat reachable at `localhost:<port>` on your laptop only. Other machines on your network cannot reach it, which matters because the container holds your F5 token and has no login of its own. |
 | `OPENAI_PROXY_URL` | Sends LobeChat's OpenAI requests to F5 AI Security |
 | `OPENAI_API_KEY` | The F5 project token. It selects the project and its guardrails. |
 | `OPENAI_MODEL_LIST` | Hides the default OpenAI models and shows only the Bedrock model, with a readable label |
 | `NODE_EXTRA_CA_CERTS` and `-v` | Makes the container trust the lab's self-signed certificate |
 | `--add-host` | Option B only: lets the container resolve your lab hostname, using `F5_LB_IP` from 2.6. With option A the variable is unset and this option is left out automatically. |
 
-### 4.2 Select the model
+### 4.2 Check that the containers are running
+
+```bash
+docker ps --filter name=lobe- --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+```
+
+Expected: two rows, both `Up`, one on port 3210 and one on port 3211.
+
+```text
+NAMES            STATUS          PORTS
+lobe-baseline    Up 20 seconds   127.0.0.1:3211->3210/tcp
+lobe-protected   Up 20 seconds   127.0.0.1:3210->3210/tcp
+```
+
+Then confirm each one answers:
+
+```bash
+for PORT in 3210 3211; do
+  curl -s -o /dev/null -w "localhost:$PORT -> HTTP %{http_code}\n" "http://localhost:$PORT/"
+done
+```
+
+Each line should print `HTTP 200` or a `30x` redirect. `HTTP 000` means the container is still starting. Wait ten seconds and retry.
+
+If a container is missing from the list, it stopped. Find out why:
+
+```bash
+docker ps -a --filter name=lobe-
+docker logs lobe-protected --tail 30
+```
+
+**Managing the containers during the lab**
+
+| You want to | Do this |
+| --- | --- |
+| Free up resources for a while | `docker stop lobe-protected lobe-baseline` |
+| Bring them back, for example after restarting your laptop | `docker start lobe-protected lobe-baseline` |
+| Use a new token, hostname, or load balancer IP | Update `lab.env`, run `source ~/f5-ai-lab/lab.env`, then run the whole block in 4.1 again. It removes and recreates both containers. |
+| Remove them | `docker rm -f lobe-protected lobe-baseline` |
+
+Chat history is stored in your browser, not in the container, so recreating a container does not erase it.
+
+### 4.3 Select the model
 
 1. Open <http://localhost:3210>.
 2. Start a chat. In the model picker at the top of the chat, choose **Bedrock with Guardrails**.
@@ -837,7 +1028,7 @@ What each option does:
 
 Arrange the two tabs side by side.
 
-### 4.3 Run the test prompts
+### 4.4 Run the test prompts
 
 Send each prompt in **both** tabs and record what happens.
 
@@ -1084,12 +1275,27 @@ After `down`, `status` must show `Environment: stopped` and `EBS volumes: none f
 Then:
 
 - Delete the Bedrock API key in the AWS console (**Amazon Bedrock > API keys**).
+- AWS access from 1.5. Method 1: `aws sso logout`. Method 2: close the terminals; the keys expire by themselves. Method 3: in the AWS console go to **IAM > Users > your user > Security credentials**, and under **Access keys** choose **Actions > Deactivate**, then **Delete**.
+- Optional: remove the downloaded image with `docker image rm lobehub/lobe-chat:1.143.3`.
 - Option B: remove the line you added to `/etc/hosts` (and the Windows hosts file, if used). Option A: `down` already removed the DNS record.
 - Delete `~/f5-ai-lab/lab.env`, `config/harbor.txt`, `config/license.txt`, the `.secrets/` folder in `f5-guardrail-cm`, and the `.env.*` files. They hold secrets.
 
 ---
 
 ## Troubleshooting
+
+### Section 1 - prerequisites
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `Unable to locate credentials` | The AWS CLI is not signed in, or `AWS_PROFILE` is not set in this terminal | `source ~/f5-ai-lab/lab.env` (method 1), paste fresh keys (method 2), or `aws configure` (method 3) |
+| `ExpiredToken` or "token has expired" | Method 1 or 2 credentials ran out | Method 1: `aws sso login --profile f5-ai-lab`. Method 2: copy fresh keys from the portal. |
+| `aws sts get-caller-identity` shows the wrong account | Another profile or old environment variables are active | `env | grep '^AWS_'` to see what is set. Unset what you do not want, or open a new terminal. |
+| `AccessDenied` or `UnauthorizedOperation` during preflight or `up` | The role lacks a permission the lab needs | Ask for a role with the permissions listed in 1.5 |
+| `Cannot connect to the Docker daemon` | Docker is not running | Start Docker (1.4) and wait for it to finish starting |
+| `permission denied` on `/var/run/docker.sock` (Linux) | Your user is not in the `docker` group | `sudo usermod -aG docker $USER`, then log out and back in |
+| `docker pull` fails with "manifest unknown" or "not found" | The image tag is not available | Ask your instructor which tag to use, and use the same tag in 1.9 and 4.1 |
+| `docker pull` times out | A proxy or VPN is blocking Docker Hub | Try off VPN, or configure the proxy in Docker's settings |
 
 ### Section 2 - deployment
 
@@ -1161,6 +1367,7 @@ done
 | Certificate errors persist in `docker logs` | The image ignores the extra CA | For this lab only, recreate the container adding `-e NODE_TLS_REJECT_UNAUTHORIZED=0`. Never do this outside a lab. |
 | Model list is empty | `OPENAI_MODEL_LIST` not applied | Recreate the container. Settings from an older container can persist in the browser, so try a private window. |
 | Replies are empty | Streaming is not passing through cleanly | Confirm with the `ask` helper that non-streaming works, then report to your instructor |
+| `docker run` fails with "port is already allocated" | Something else on your laptop uses port 3210 or 3211 | `docker ps` to find an old container and remove it, or change the port numbers in the two `start_lobe` lines and use the new ports in your browser |
 | Both tabs behave the same | Both containers got the same token | `docker inspect lobe-baseline --format '{{.Config.Env}}'` and compare |
 
 ### Section 5 - multi-agent app
@@ -1207,7 +1414,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 1. **Guardrail UI labels (3.3).** The connection, project, and token steps follow the public documentation. The steps for enabling guardrails inside a project are described by category because the documentation pages reviewed did not give exact labels. Replace 3.3 with the exact names for your operator version.
 2. **Tool calling through the Bedrock connection (Section 5).** The app forces specific tool calls and asks for JSON output. Confirm that `openai.gpt-oss-120b-1:0` behind the OpenAI Compatible connection honors both. If it does not, pick a Bedrock model that does and update `BEDROCK_MODEL` and the connection's **Model name**.
 3. **Blocked-response shape (Sections 3-5).** The app reports `blocked` when the error body contains `error.cai_error.outcome = "blocked"`. Confirm your release returns that shape so the app shows `blocked` instead of a generic 500 error.
-4. **LobeChat (Section 4).** Confirm the pinned tag `lobehub/lobe-chat:1.143.3` pulls, that `NODE_EXTRA_CA_CERTS` makes it trust the lab certificate, and that streamed replies pass through F5 AI Security. `lobehub/lobe-chat` is the v1 single-container image. The v2 image (`lobehub/lobehub`) needs PostgreSQL, Redis, and object storage and is not suitable for a short lab.
+4. **LobeChat (Section 4).** The containers are published on `127.0.0.1` only. If students must reach LobeChat from another machine, change the `-p` option and set LobeChat's `ACCESS_CODE`. Confirm the pinned tag `lobehub/lobe-chat:1.143.3` pulls, that `NODE_EXTRA_CA_CERTS` makes it trust the lab certificate, and that streamed replies pass through F5 AI Security. `lobehub/lobe-chat` is the v1 single-container image. The v2 image (`lobehub/lobehub`) needs PostgreSQL, Redis, and object storage and is not suitable for a short lab.
 5. **Leak scenario outcome (Check 2).** Whether the baseline answer contains the client data depends on the model following the injected text. Confirm it leaks on baseline and is stopped on protected with your guardrail set. If baseline does not leak, the lab still works as a logging comparison, but the contrast is weaker.
 6. **Operator version.** `guardrails-poc.env.example` pins `OPERATOR_CHART_VERSION="1.10.0"`. Pin the version you rehearse.
 7. **Source-address restriction (stage 8, step 2.5).** The script installs NGINX behind a Network Load Balancer with instance targets and no AWS Load Balancer Controller, and sets `loadBalancerSourceRanges` on the service when it is first created. Confirm on a live cluster that (a) the load balancer is never open to `0.0.0.0/0`, so check B is empty from the start, (b) Kubernetes writes the rules for the allowed addresses into the EKS cluster security group, so check A passes, (c) load balancer health checks pass, (d) `access` updates the rules within about a minute, and (e) rerunning `up` keeps the restriction.
@@ -1218,6 +1425,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 
 ### Class logistics
 
+- **AWS access (1.5):** tell students before class which method to use and, for method 1, hand out the start URL, SSO region, account, and role name. The console and portal labels in 1.5 follow AWS's documentation and were not re-checked against a live console.
 - **Shared AWS account:** give each student a unique `CLUSTER_NAME`, and confirm the G and VT quota covers 24 vCPUs per student.
 - **DNS:** decide before class whether students use Route 53 (option A) or a hosts file (option B). For option A, hand out the zone name, the hosted zone ID, and one hostname per student. The example config contains a hosted zone ID from the original author's account, which must be replaced.
 - **Pre-building:** `up` reuses an existing cluster and node groups. To save 20-30 minutes of class time, create both beforehand with the `eksctl` commands in the README's manual reference, then have students run `up`.
