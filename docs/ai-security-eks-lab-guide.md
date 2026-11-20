@@ -2258,7 +2258,7 @@ The script warns you if the name does not resolve to the load balancer yet, and 
 
 2. Save the lab certificate again (step 2.8). The certificate is issued for the exact hostname, so the old file no longer matches.
 3. If you added a hosts file entry for the old name, remove it and run `unset F5_LB_IP`.
-4. If the LobeChat containers or the multi-agent app are running, start them again (steps 4.1 and 5.4) so they use the new name.
+4. If the LobeChat containers or the multi-agent app are running, start them again so they use the new name: step 4.1 for LobeChat, and the `make_env` block in step 5.3 followed by step 5.4 for the multi-agent app.
 
 Your admin password, Bedrock connection, projects, and project tokens are unchanged.
 
