@@ -1151,14 +1151,27 @@ To get the longest life from the key, start with a fresh console session.
 9. Check that the key works by calling Bedrock directly:
 
    ```bash
-   curl -sS "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions" \
+   echo "region=[$BEDROCK_REGION] model=[$BEDROCK_MODEL] key length=${#BEDROCK_API_KEY}"
+
+   curl -sS -w '\nHTTP %{http_code}\n' \
+     "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions" \
      -H "Authorization: Bearer ${BEDROCK_API_KEY}" \
      -H "Content-Type: application/json" \
-     -d '{"model":"'"${BEDROCK_MODEL}"'","messages":[{"role":"user","content":"Say hello in five words."}]}' \
-     | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
+     -d '{"model":"'"${BEDROCK_MODEL}"'","messages":[{"role":"user","content":"Say hello in five words."}]}'
    ```
 
-   It should print a short greeting. This is the same chat completions call that F5 AI Security will make.
+   This is the same chat completions call that F5 AI Security will make. It prints Bedrock's reply in full, followed by the HTTP status. It does not print your key.
+
+   **Success** is `HTTP 200` and a reply that contains `"choices"` with a short greeting inside it.
+
+   Anything else is an error, and the reply says what went wrong:
+
+   | What you see | Likely cause | What to do |
+   | --- | --- | --- |
+   | `key length=7` in the first line | The key was not saved. The value is still `NOT-SET`. | Run `labvar BEDROCK_API_KEY` again and paste the key |
+   | `HTTP 401` or `403` with a message about an invalid or expired token | The key expired, or it was created in a different region. A short-term key works only in the region that was selected in the console when you created it. | Check that the console region matches `region=[...]` in the first line, then create a new key |
+   | `HTTP 403` with "not authorized" or "access denied" | Your role lacks `bedrock:InvokeModel` or `bedrock:CallWithBearerToken`, or your organization blocks Bedrock API keys | Give the full reply to your AWS administrator. See step 1.4, Part A. |
+   | `HTTP 400` or `404` that names the model | The model is not available to your account in this region, or is not served on this endpoint | See "Optional - use a different Bedrock model" in step 1.6 |
 
 Keep the console tab open. You need the key again in step 3.2.
 
@@ -1166,7 +1179,7 @@ Reference: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-genera
 
 #### When the key expires
 
-You will know because every prompt starts failing in every client at the same moment, in both the baseline and protected projects, and the direct `curl` check in step 9 fails too. To renew:
+You will know because every prompt starts failing in every client at the same moment, in both the baseline and protected projects, and the direct `curl` check in step 9 returns `HTTP 401` or `403` instead of `HTTP 200`. To renew:
 
 1. Repeat steps 1 to 9 above to create and save a new key.
 2. In the F5 AI Security UI, go to **Configuration > Connections**. Open the three-dot menu on the `bedrock-lab` connection and select **Manage model**.
