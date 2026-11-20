@@ -218,6 +218,9 @@ load_config() {
   KEYCLOAK_BASE_PATHS="${KEYCLOAK_BASE_PATHS:-/auth /}"
   PASSWORD_ROTATION_ATTEMPTS="${PASSWORD_ROTATION_ATTEMPTS:-40}"
   INFERENCE_WAIT_SECONDS="${INFERENCE_WAIT_SECONDS:-1800}"
+  TUNE_NODE_VOLUMES="${TUNE_NODE_VOLUMES:-true}"
+  NODE_VOLUME_IOPS="${NODE_VOLUME_IOPS:-6000}"
+  NODE_VOLUME_THROUGHPUT="${NODE_VOLUME_THROUGHPUT:-500}"
   RECYCLE_STUCK_INFERENCE_PODS="${RECYCLE_STUCK_INFERENCE_PODS:-true}"
   STUCK_POD_GRACE_SECONDS="${STUCK_POD_GRACE_SECONDS:-300}"
   STUCK_POD_MAX_RECYCLES="${STUCK_POD_MAX_RECYCLES:-3}"
@@ -813,6 +816,49 @@ create_cluster() {
       run eksctl create nodegroup --cluster "$CLUSTER_NAME" --region "$AWS_REGION" --name "$RED_TEAM_NODEGROUP_NAME" --node-type "$RED_TEAM_NODE_TYPE" --nodes "$RED_TEAM_NODE_COUNT" --nodes-min "$RED_TEAM_NODE_MIN" --nodes-max "$RED_TEAM_NODE_MAX" --node-volume-size "$RED_TEAM_NODE_VOLUME_SIZE" --node-ami-family "$NODE_AMI_FAMILY" --managed --install-nvidia-plugin
     fi
   fi
+}
+
+# Raise the IOPS and throughput of each node's root disk. eksctl creates gp3
+# volumes at the default 3000 IOPS and 125 MiB/s, and its command-line flags
+# cannot change that. At the default, unpacking the model images (up to 26 GB)
+# is slow enough that model pods fail to start (CreateContainerError). The
+# change is applied to the live volume and needs no restart. It is not part of
+# the node group's launch template, so a replacement node gets default disks
+# until "up" runs again. Any failure here is reported and "up" continues.
+tune_node_volumes() {
+  [[ "$TUNE_NODE_VOLUMES" == "true" ]] || return 0
+  if [[ "$DRY_RUN" == true ]]; then
+    printf '+ aws ec2 modify-volume --iops %s --throughput %s on the root volume of each node in cluster %s\n' "$NODE_VOLUME_IOPS" "$NODE_VOLUME_THROUGHPUT" "$CLUSTER_NAME"
+    return 0
+  fi
+
+  local volumes vol vtype iops thr
+  volumes="$(aws ec2 describe-instances --region "$AWS_REGION" \
+    --filters "Name=tag:eks:cluster-name,Values=$CLUSTER_NAME" "Name=instance-state-name,Values=running" \
+    --query 'Reservations[].Instances[].BlockDeviceMappings[0].Ebs.VolumeId' --output text 2>/dev/null)" || volumes=""
+  if [[ -z "$volumes" || "$volumes" == "None" ]]; then
+    log "Node disks: could not list the node volumes; leaving them at their defaults"
+    return 0
+  fi
+
+  for vol in $volumes; do
+    read -r vtype iops thr < <(aws ec2 describe-volumes --region "$AWS_REGION" --volume-ids "$vol" \
+      --query 'Volumes[0].[VolumeType,Iops,Throughput]' --output text 2>/dev/null) || true
+    if [[ "$vtype" != "gp3" ]]; then
+      log "Node disks: $vol is ${vtype:-unknown}, not gp3; leaving it unchanged"
+      continue
+    fi
+    if [[ "${iops:-0}" -ge "$NODE_VOLUME_IOPS" && "${thr:-0}" -ge "$NODE_VOLUME_THROUGHPUT" ]]; then
+      log "Node disks: $vol already at $iops IOPS and $thr MiB/s"
+      continue
+    fi
+    if aws ec2 modify-volume --region "$AWS_REGION" --volume-id "$vol" \
+        --iops "$NODE_VOLUME_IOPS" --throughput "$NODE_VOLUME_THROUGHPUT" >/dev/null 2>&1; then
+      log "Node disks: $vol raised from ${iops} IOPS / ${thr} MiB/s to $NODE_VOLUME_IOPS IOPS / $NODE_VOLUME_THROUGHPUT MiB/s"
+    else
+      log "Node disks: could not modify $vol (missing ec2:ModifyVolume, or it was modified in the last 6 hours); continuing"
+    fi
+  done
 }
 
 install_storage_addons() {
@@ -1930,6 +1976,7 @@ verify_public_url() {
 do_up() {
   preflight_up deploy
   create_cluster
+  tune_node_volumes
   install_storage_addons
   create_harbor_secret
   install_operator
