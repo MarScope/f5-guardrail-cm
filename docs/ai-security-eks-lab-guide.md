@@ -1281,6 +1281,19 @@ Bedrock exposes a chat completions endpoint, so you use the built-in **OpenAI Co
 
 The platform sends the prompt "Hello there" to Bedrock. On success you see **Configuration Saved!** and the connection appears under **Model connections**. On failure nothing is saved. Expand **Error** to read why.
 
+If the test fails, work through these in order:
+
+1. **Check the key and model without F5 in the path.** Run the direct `curl` check from step 3.1 again. If that fails too, the problem is the key, the region, or the model, not the connection. Fix it there first.
+2. **Check the URL field.** It must be the address printed above, with the same region the key was created in, and no space before or after it.
+3. **If the error is "not found" or HTTP 404,** the form in your release may add `/chat/completions` itself. Remove that ending, so the URL stops at `/openai/v1`, and test again:
+
+   ```bash
+   echo "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1"
+   ```
+
+   Tell your instructor which form of the URL worked.
+4. **Paste the API key again.** A renewed key is not picked up by an existing connection until you enter it.
+
 > The **Display name** becomes part of the URL that clients call: `https://<F5_HOST>/openai/<Display name>`. It is a label for the connection, not the model, so it stays the same if you change the model later.
 
 ### 3.3 Create the baseline project
@@ -1855,7 +1868,8 @@ done
 | **Test and connect** rejects the key or the field cuts it off | The short-term key is too long for the field in your release | Use a long-term key (step 3.1, fallback), which is much shorter |
 | Error says the model is not supported on this route | The model is served on a different Bedrock endpoint | Try the URL `https://bedrock-mantle.<region>.api.aws/v1/chat/completions` with model `openai.gpt-oss-120b` |
 | You need a different model, or the chosen one is not available | The default model does not suit your account or region | See "Optional - use a different Bedrock model" in step 1.6 |
-| **Test and connect** fails in F5 but the Section 1 check passes | Typo in **Model name** or **URL** | The URL must be the full path ending in `/chat/completions` |
+| **Test and connect** fails in F5 but the direct `curl` check in step 3.1 passes | Typo in **Model name** or **URL**, an old key in the form, or the form expects the base address | Follow "If the test fails" in step 3.2. The URL is normally the full path ending in `/chat/completions`. |
+| **Test and connect** times out or cannot reach Bedrock | The cluster has no outbound route to Bedrock | `kubectl run brtest --rm -i --restart=Never --image=curlimages/curl -- -s -o /dev/null -w "HTTP %{http_code}\n" "https://bedrock-runtime.$BEDROCK_REGION.amazonaws.com/"`. Any HTTP code means the route works. Then read `kubectl logs -n cai-moderator deploy/cai-moderator --tail=300`. |
 | `ask` prints an invalid token error | Token pasted with a space or newline, or it expired | Generate a new project token (3.5) |
 | `ask` returns "not found" for the connection | `F5_CONNECTION` does not match the connection's **Display name** | Make them identical |
 | Protected project does not block | Guardrail off, or set to audit | Revisit 3.4 |
@@ -1929,6 +1943,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 13. **Stuck model pod recovery and node disk speed.** On a live run the Red Team model pod (26 GB image) sat in `CreateContainerError` with "context deadline exceeded" and "failed to reserve container name" events. It started after the node's root volume was raised to 6000 IOPS and 500 MiB/s with `aws ec2 modify-volume` and the pod was deleted. Both were done together, so which one was needed is not known. `up` now does both: it raises every node's root volume right after the cluster and node groups exist (`TUNE_NODE_VOLUMES`, `NODE_VOLUME_IOPS`, `NODE_VOLUME_THROUGHPUT`), and it deletes a model pod that has been in that state for 5 minutes, up to 3 times. Neither step has run on a live cluster as part of the script; the pod loop was tested against simulated pod states. Confirm on a live cluster that the `Node disks:` lines report each volume raised and that model pods start without a recycle. The volume change needs `ec2:ModifyVolume` and `ec2:DescribeVolumes`, is not part of the launch template, and so does not carry over to a replacement node until `up` runs again. Moving node group creation to an eksctl config file with `volumeIOPS` and `volumeThroughput` would make it permanent.
 14. **VPC limit and leftover stack checks, and the cost estimate.** A second student in a shared account hit "The maximum number of VPCs has been reached", then "Stack already exists", then termination protection on the leftover stack. `preflight` now fails early on both conditions and prints the commands to fix them. Both checks were tested against simulated AWS responses only. Before class in a shared account, raise "VPCs per Region" to the number of students plus the VPCs already there. `scripts/cost-estimate.sh` uses built-in us-east-1 list prices recorded on 2026-11-20 unless the role has `pricing:GetProducts`; the live price lookup was tested against a simulated response only. Check the built-in prices against the AWS pricing pages before quoting a class budget.
 15. **Changing the hostname (option C in 2.6, Appendix F).** `scripts/set-hostname.sh` and the `hostname` action were tested with stand-in tools only, not on a live cluster, and the sandbox could not resolve `sslip.io`, so the success path of `auto` has not run at all. Confirm on a live cluster that after `set-hostname.sh auto` (a) the platform restarts with the new base URL, (b) the login page works under the new name, meaning the login service accepts the new redirect address and does not keep the hostname from the first install, (c) API calls with existing project tokens work, and (d) the chosen `sslip.io` name resolves on the class network. If (b) fails, do not offer option C after deployment; instead pick the hostname before the first `up`. Company DNS servers often block `sslip.io` and `nip.io`, so test from the network students will use.
+16. **The URL field of the OpenAI Compatible connection (step 3.2).** Checked against AWS documentation on 2026-11-20: the Bedrock Runtime chat completions address is `https://bedrock-runtime.<region>.amazonaws.com/openai/v1/chat/completions`, and the base address for OpenAI SDK clients is the same without `/chat/completions`. AWS also documents `https://bedrock-runtime.<region>.amazonaws.com/v1/chat/completions` and a newer `bedrock-mantle` endpoint. What is not confirmed from F5 documentation is whether the **URL** field of this form expects the full path or the base address. F5's own built-in OpenAI provider uses a full path (`https://api.openai.com/v1/chat/completions`), which is why the guide gives the full path first and the base address as the fallback. Record which one works on your release and remove the other from step 3.2.
 
 ### Class logistics
 
