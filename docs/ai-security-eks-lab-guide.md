@@ -25,6 +25,7 @@ Hands-on lab: deploy F5 AI Security (Guardrails) on Amazon EKS, connect it to a 
 - [Appendix B - Instructor notes](#appendix-b---instructor-notes)
 - [Appendix C - Diagnose a Bedrock API key](#appendix-c---diagnose-a-bedrock-api-key)
 - [Appendix D - Change who can reach the platform](#appendix-d---change-who-can-reach-the-platform)
+- [Appendix E - Update your copy of the lab material](#appendix-e---update-your-copy-of-the-lab-material)
 
 ## What you will build
 
@@ -1673,7 +1674,7 @@ Then:
 - AWS access from step 1.4. Method 1: `aws sso logout`. Method 2: close the terminals; the keys expire by themselves. Method 3: in the AWS console go to **IAM > Users > your user > Security credentials**, and under **Access keys** choose **Actions > Deactivate**, then **Delete**.
 - Optional: remove the downloaded image with `docker image rm lobehub/lobe-chat:1.143.3`.
 - Option B: remove the line you added to `/etc/hosts` (and the Windows hosts file, if used). Option A: `down` already removed the DNS record.
-- Delete `~/f5-ai-lab/lab.env`, `config/harbor.txt`, `config/license.txt`, the `.secrets/` folder in `f5-guardrail-cm`, and the `.env.*` files. They hold secrets.
+- Delete `~/f5-ai-lab/lab.env` and any `lab.env.bak-*` backups beside it, `config/harbor.txt`, `config/license.txt`, the `.secrets/` folder in `f5-guardrail-cm`, and the `.env.*` files. They hold secrets.
 
 ---
 
@@ -1686,6 +1687,7 @@ For AWS sign-in problems, see Part C of step 1.4.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `labvar: command not found` | `lab.env` is not loaded in this terminal | `source ~/f5-ai-lab/lab.env` |
+| `labcfg`, `labsecrets`, or `labrefresh`: command not found, but `labvar` works | Your `lab.env` was created from an older version of the lab | Follow [Appendix E](#appendix-e---update-your-copy-of-the-lab-material) |
 | Pasted commands print `command not found: #` or behave oddly on macOS | The terminal is running zsh, not Bash | Type `bash`, then `source ~/f5-ai-lab/lab.env` |
 | `kubectl` says you must be logged in, or `Unauthorized`, after the cluster exists | You are signed in to AWS as a different identity than the one that created the cluster | Sign in with the same method and role you used for `up` |
 | `AccessDenied` or `UnauthorizedOperation` during preflight or `up` | The role lacks a permission the lab needs | The error names the missing action. Ask for a role with the permissions in step 1.4, Part A. |
@@ -1834,7 +1836,8 @@ None of the following could be tested without a licensed cluster. Run the whole 
 - **Shell (step 1.1):** the commands assume Bash. On macOS the default shell is zsh, where pasted comment lines and some function definitions fail, so the guide has students type `bash` first and `lab.env` warns when they forget.
 - **Sign-in expiry commands (step 1.4):** the `jq` commands were run with jq 1.7 against sample cache files written to match the AWS CLI's format, including the older `...UTC` timestamp style. They were not run against a real `~/.aws/sso/cache`. `strflocaltime` needs jq 1.6 or newer.
 - **Allowed addresses (Appendix D):** `scripts/allowed-ips.sh` was tested against stand-in `kubectl` and `aws` commands, not a live cluster. The console steps assume that Kubernetes leaves alone any security group rule it did not create. Confirm on a live cluster that a rule added by hand survives a later `refresh`, and that the console labels match.
-- **Helper commands:** `labvar`, `labcfg`, and `labsecrets` come from `scripts/labvar` and are defined in `lab.env`. Hidden input was tested on Linux with pasted values of several thousand characters. It was not tested on macOS.
+- **Updating (Appendix E):** `labrefresh` was tested on Linux against an older-style `lab.env`. The `git pull` and `git stash` steps are standard git and were not run against a student's working copy.
+- **Helper commands:** `labvar`, `labcfg`, `labsecrets`, and `labrefresh` come from `scripts/labvar`. They are defined in `scripts/lab-helpers.sh`, which `lab.env` loads, so `git pull` keeps them current. Hidden input was tested on Linux with pasted values of several thousand characters. It was not tested on macOS.
 - **Shared AWS account:** give each student a unique `CLUSTER_NAME`, and confirm the G and VT quota covers 24 vCPUs per student.
 - **DNS:** decide before class whether students use Route 53 (option A) or a hosts file (option B). For option A, hand out the zone name, the hosted zone ID, and one hostname per student. The example config contains a hosted zone ID from the original author's account, which must be replaced.
 - **Pre-building:** `up` reuses an existing cluster and node groups. To save 20-30 minutes of class time, create both beforehand with the `eksctl` commands in the README's manual reference, then have students run `up`.
@@ -2018,3 +2021,83 @@ The address can connect within a few seconds.
 - **Never set a source of `0.0.0.0/0` or "Anywhere".** That exposes the login page to the whole internet.
 - **The script does not know about console rules.** `status` and `allowed-ips.sh show` judge "this machine is allowed" from the managed list, so they can say `NO` for an address you allowed by hand. The rule still appears in the list of security group rules that `show` prints.
 - **Console rules are not saved in the configuration.** They last until you delete them or the cluster is deleted. They are not recreated if you tear down and redeploy.
+
+## Appendix E - Update your copy of the lab material
+
+The lab's scripts and this guide change over time. Use this appendix to bring your copy up to date without losing anything you have filled in. It is safe to do in the middle of the lab, and it does not touch a running deployment.
+
+### What an update changes, and what it leaves alone
+
+| Left alone | Why |
+| --- | --- |
+| `config/guardrails-poc.env`, your deployment settings | Git ignores this file |
+| `config/harbor.txt` and `config/license.txt` | Git ignores these files |
+| `.secrets/`, your admin and database passwords | Git ignores this folder |
+| Your values in `~/f5-ai-lab/lab.env` | The file is outside the repository, and step 2 below keeps every value |
+| The running cluster, LobeChat containers, and multi-agent app | Updating files on your laptop changes nothing that is already running |
+
+What does change: the scripts in `scripts/`, the example files in `config/`, and this guide.
+
+### Step 1 - get the latest files
+
+```bash
+cd ~/f5-ai-lab/f5-guardrail-cm
+git pull
+```
+
+`Already up to date.` means there was nothing new. Otherwise git lists the files it updated.
+
+If `git pull` stops with "Your local changes to the following files would be overwritten", you have edited a file that git tracks, such as a script or one of the `.example` files. Set your edits aside, update, and put them back:
+
+```bash
+git status --short     # lines that start with " M" are tracked files you changed
+git stash              # set your edits aside
+git pull
+git stash pop          # put your edits back on top of the new version
+```
+
+If `git stash pop` reports a conflict, your edit and the update changed the same lines. Git marks both versions inside the file. Ask your instructor for help resolving it. Your edits are not lost.
+
+### Step 2 - refresh your values file
+
+Your `lab.env` is a copy that was made when you started, so `git pull` does not update it. One command rebuilds it from the latest example and carries over every value you have set:
+
+```bash
+~/f5-ai-lab/f5-guardrail-cm/scripts/labvar --refresh-env
+source ~/f5-ai-lab/lab.env
+```
+
+It prints how many values it kept, and it saves your previous file beside the new one as `lab.env.bak-<date>-<time>`. If it says `already up to date`, nothing needed changing.
+
+After the first refresh a shorter form is available. It does the same thing and reloads the file for you:
+
+```bash
+labrefresh
+```
+
+Run `source ~/f5-ai-lab/lab.env` in any other terminals you have open, so that they pick up the refreshed file too.
+
+### Step 3 - check
+
+```bash
+echo "Cluster: $CLUSTER_NAME   Host: $F5_HOST   Connection: $F5_CONNECTION"
+type labvar labcfg labsecrets labrefresh | grep -c "is a function"
+cd ~/f5-ai-lab/f5-guardrail-cm && ./scripts/guardrails-poc.sh status
+```
+
+The first line must show your own values, not `CHANGEME` or defaults you had replaced. The second must print `4`. `status` should report the same healthy deployment as before the update.
+
+### Things to know
+
+- **Your connection name is kept.** Newer versions of the example use `bedrock-lab` as the default connection name, where older ones used `bedrock-gpt-oss`. The refresh keeps whatever you had, which is correct: the name must match the **Display name** of the connection you already created in F5 AI Security.
+- **New settings take their defaults.** If an update adds a setting to `config/guardrails-poc.env.example`, your own `guardrails-poc.env` does not have it, and the script uses the default. To see what is new, compare the setting names:
+
+  ```bash
+  diff <(grep -oE '^[A-Z0-9_]+=' config/guardrails-poc.env | sort) \
+       <(grep -oE '^[A-Z0-9_]+=' config/guardrails-poc.env.example | sort)
+  ```
+
+  Lines starting with `>` are settings that exist only in the example. Add one with `labcfg NAME VALUE` if you want something other than its default.
+- **A script update does not change a running deployment.** New script behavior applies the next time you run a command such as `up` or `allowed-ips.sh`.
+- **The multi-agent app is a separate repository.** Update it the same way if your instructor asks: `cd ~/f5-ai-lab/f5-ai-sec-multi-agent-system-app && git pull`. Its `.env.baseline` and `.env.protected` files are ignored by git and are left alone.
+- **Backups contain secrets.** The `lab.env.bak-*` files hold the same keys and tokens as `lab.env`. Delete them when you no longer need them, and at cleanup.

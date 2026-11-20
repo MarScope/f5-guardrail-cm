@@ -6,8 +6,11 @@
   labvar --config NAME VALUE save NAME in config/guardrails-poc.env in this repository
   labvar --f5-secrets        ask for the Harbor login and the F5 license and write
                              config/harbor.txt and config/license.txt
+  labvar --refresh-env       rebuild ~/f5-ai-lab/lab.env from config/lab.env.example,
+                             keeping every value you have set (the old file is backed up)
 
-lab.env defines shell functions (labvar, labcfg, labsecrets) that call this script.
+scripts/lab-helpers.sh, loaded by lab.env, defines shell functions (labvar, labcfg,
+labsecrets, labrefresh) that call this script.
 """
 import os
 import re
@@ -102,9 +105,67 @@ def write_private(path, text):
     os.chmod(path, 0o600)
 
 
+EXPORT_LINE = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=")
+ANY_EXPORT_LINE = re.compile(r"^\s*(?:#\s*)?export\s+([A-Za-z_][A-Za-z0-9_]*)=")
+
+
+def refresh_env():
+    """Rebuilds lab.env from the current example while keeping the user's values."""
+    example = os.path.join(REPO, "config", "lab.env.example")
+    if not os.path.exists(example):
+        fail("Example file not found: %s" % example)
+    with open(example) as handle:
+        template = handle.read().splitlines()
+    if not os.path.exists(LAB_ENV):
+        write_private(LAB_ENV, "\n".join(template) + "\n")
+        print("Created %s from the example." % LAB_ENV)
+        return
+
+    with open(LAB_ENV) as handle:
+        old_lines = handle.read().splitlines()
+    mine = {}
+    order = []
+    for line in old_lines:
+        match = EXPORT_LINE.match(line)
+        if match:
+            if match.group(1) not in mine:
+                order.append(match.group(1))
+            mine[match.group(1)] = line
+
+    kept, used = [], set()
+    for line in template:
+        match = ANY_EXPORT_LINE.match(line)
+        if match and match.group(1) in mine and match.group(1) not in used:
+            kept.append(mine[match.group(1)])
+            used.add(match.group(1))
+        else:
+            kept.append(line)
+    extra = [name for name in order if name not in used]
+    if extra:
+        kept += ["", "# --- Values you added that are not in the example ---"]
+        kept += [mine[name] for name in extra]
+
+    new_text = "\n".join(kept) + "\n"
+    if new_text == "\n".join(old_lines) + "\n":
+        print("%s is already up to date." % LAB_ENV)
+        return
+    import time
+
+    backup = "%s.bak-%s" % (LAB_ENV, time.strftime("%Y%m%d-%H%M%S"))
+    write_private(backup, "\n".join(old_lines) + "\n")
+    write_private(LAB_ENV, new_text)
+    print("Updated %s" % LAB_ENV)
+    print("Kept %d of your values%s." % (len(mine), (" (%d not in the example: %s)" % (len(extra), ", ".join(extra))) if extra else ""))
+    print("Your previous file was saved as %s" % backup)
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip())
+        return
+
+    if argv[0] == "--refresh-env":
+        refresh_env()
         return
 
     if argv[0] == "--f5-secrets":
