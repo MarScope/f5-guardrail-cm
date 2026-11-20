@@ -257,11 +257,12 @@ You need these tools. The script in Section 2 checks for the first seven.
 | `curl` | Sends test requests |
 | `git` | Downloads the lab material |
 | `docker` | Runs LobeChat in Section 4 |
+| `jq` (optional) | Reads the sign-in expiry time in step 1.4, method 1 |
 
 **macOS** with [Homebrew](https://brew.sh):
 
 ```bash
-brew install awscli kubectl helm eksctl openssl python git
+brew install awscli kubectl helm eksctl openssl python git jq
 brew install --cask docker
 ```
 
@@ -272,6 +273,7 @@ brew install --cask docker
 - Helm: <https://helm.sh/docs/intro/install/>
 - eksctl: <https://eksctl.io/installation/>
 - Docker: <https://docs.docker.com/get-started/get-docker/>
+- jq (optional): `sudo apt-get install -y jq` on Ubuntu and WSL2
 
 **Start Docker.**
 
@@ -462,6 +464,38 @@ aws sso login --profile f5-ai-lab
 
 Run this just before you start the deployment in Section 2, so the session does not run out in the middle. If it does anyway, sign in again and rerun the same command. The script continues where it stopped.
 
+**Check when your sign-in expires.** The AWS command line keeps your sign-in token in `~/.aws/sso/cache/`. These commands read the expiry time from it. They need `jq`.
+
+Expiry time in UTC, exactly as AWS stores it:
+
+```bash
+jq -r 'select(.accessToken) | .expiresAt' ~/.aws/sso/cache/*.json
+```
+
+The same time converted to your computer's local time zone, with the minutes remaining:
+
+```bash
+jq -r 'select(.accessToken)
+  | (.expiresAt | sub("UTC$"; "Z") | fromdateiso8601) as $t
+  | "\($t | strflocaltime("%Y-%m-%d %H:%M:%S %Z"))  (\((($t - now) / 60) | floor) minutes from now)"' \
+  ~/.aws/sso/cache/*.json
+```
+
+Example output:
+
+```text
+2026-11-20 09:49:01 CST  (46 minutes from now)
+```
+
+How to read the result:
+
+- **One line per sign-in.** If you have signed in to more than one portal, you see a line for each.
+- **A negative number of minutes** means that token has already expired.
+- **A short time left is normal.** The token itself lasts about an hour. With method 1 the command line renews it automatically for as long as your company's portal session allows, so a token with ten minutes left does not mean you are about to be signed out. Run `aws sso login` only when commands actually fail, or just before the long deployment in Section 2 to start with a fresh session.
+- **The quickest test of whether you are signed in right now** is still `aws sts get-caller-identity`.
+
+The shorter form `jq -r '.expiresAt // empty' ~/.aws/sso/cache/*.json` also works, but it prints an extra date about 90 days away. That one belongs to a second file in the same folder, which records your computer's registration with the portal, not your sign-in.
+
 You are done with step 1.4. Go to step 1.5.
 
 ##### Method 2 - temporary keys copied from the access portal
@@ -559,7 +593,7 @@ You are done with step 1.4. Go to step 1.5.
 | What you see | What it means | What to do |
 | --- | --- | --- |
 | `Unable to locate credentials` | The command line is not signed in | Method 1: run `source ~/f5-ai-lab/lab.env`, then `aws sso login --profile f5-ai-lab`. Method 2: paste the keys again. Method 3: run `aws configure` again. |
-| A message about an expired or invalid token | Your session ended | Method 1: `aws sso login --profile f5-ai-lab`. Method 2: copy fresh keys from the portal. |
+| A message about an expired or invalid token | Your session ended | Method 1: `aws sso login --profile f5-ai-lab`. To see the expiry time, use the `jq` commands under "Check when your sign-in expires" above. Method 2: copy fresh keys from the portal. |
 | The wrong `Account` number | Another sign-in is taking priority | Run `env | grep '^AWS_'`. Remove anything you did not set in this step with `unset NAME`, or open a new terminal. |
 | `InvalidClientTokenId` or `SignatureDoesNotMatch` | The access key or secret was pasted incorrectly | Method 3: run `aws configure` again and paste carefully, with no spaces |
 
@@ -1643,6 +1677,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 - **AWS access (step 1.4):** before class, make sure every student's role has one of the two permission sets in Part A, and tell them which sign-in method to use. For method 1, hand out the portal address, account number, and role name. The console, portal, and `aws configure sso` prompt wording in 1.4 follows AWS's documentation and was not re-checked against a live console.
 - **Scoped permissions (step 1.4, set 2):** `docs/iam/lab-scoped-policy.json` combines the `eksctl` minimum policies with the extra calls this lab makes. It has not been run end to end. Rehearse with it once before relying on it, or use `AdministratorAccess` in a sandbox account.
 - **Shell (step 1.1):** the commands assume Bash. On macOS the default shell is zsh, where pasted comment lines and some function definitions fail, so the guide has students type `bash` first and `lab.env` warns when they forget.
+- **Sign-in expiry commands (step 1.4):** the `jq` commands were run with jq 1.7 against sample cache files written to match the AWS CLI's format, including the older `...UTC` timestamp style. They were not run against a real `~/.aws/sso/cache`. `strflocaltime` needs jq 1.6 or newer.
 - **Helper commands:** `labvar`, `labcfg`, and `labsecrets` come from `scripts/labvar` and are defined in `lab.env`. Hidden input was tested on Linux with pasted values of several thousand characters. It was not tested on macOS.
 - **Shared AWS account:** give each student a unique `CLUSTER_NAME`, and confirm the G and VT quota covers 24 vCPUs per student.
 - **DNS:** decide before class whether students use Route 53 (option A) or a hosts file (option B). For option A, hand out the zone name, the hosted zone ID, and one hostname per student. The example config contains a hosted zone ID from the original author's account, which must be replaced.
