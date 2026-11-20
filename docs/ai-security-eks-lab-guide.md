@@ -26,6 +26,7 @@ Hands-on lab: deploy F5 AI Security (Guardrails) on Amazon EKS, connect it to a 
 - [Appendix C - Diagnose a Bedrock API key](#appendix-c---diagnose-a-bedrock-api-key)
 - [Appendix D - Change who can reach the platform](#appendix-d---change-who-can-reach-the-platform)
 - [Appendix E - Update your copy of the lab material](#appendix-e---update-your-copy-of-the-lab-material)
+- [Appendix F - Change the hostname](#appendix-f---change-the-hostname)
 
 ## What you will build
 
@@ -1038,6 +1039,20 @@ The hostname exists only on your laptop, so you add it to your hosts file.
 
    On Windows, also add the same line to `C:\Windows\System32\drivers\etc\hosts` (edit as Administrator) so your Windows browser can resolve the name.
 
+#### Option C - a public DNS name, if you cannot edit your hosts file
+
+Use this if your laptop does not let you change the hosts file and you have no Route 53 zone. One command switches the deployment to a hostname on a free public DNS service that needs no setup:
+
+```bash
+./scripts/set-hostname.sh auto
+```
+
+```bash
+source ~/f5-ai-lab/lab.env
+```
+
+The script prints the new hostname, which looks like `guardrails.203-0-113-10.sslip.io`, and takes a few minutes while the platform restarts. You do not need `F5_LB_IP` or a hosts entry. Details, limits, and how to use your own DNS service instead are in [Appendix F](#appendix-f---change-the-hostname).
+
 ### 2.7 Log in with your new admin password (required)
 
 The script already replaced the initial password, so `admin` / `pass` no longer works. Your password was generated for you and saved on your laptop.
@@ -1742,6 +1757,9 @@ For AWS sign-in problems, see Part C of step 1.4.
 | `status` shows `Ingress access: failed (open to every address ...)` | The restriction is missing from the service | `./scripts/guardrails-poc.sh access` |
 | `status` shows `Admin password: failed (initial password still accepted ...)` | Password replacement was skipped or disabled | Rerun `up` with `ROTATE_DEFAULT_PASSWORD="true"`, or change it by hand as in 2.7 |
 | Browser says the site cannot be found | DNS record not yet visible (option A), or hosts entry missing or load balancer IP changed (option B) | Repeat 2.6 |
+| You cannot edit the hosts file (no administrator rights) | Company laptop policy | Use option C in 2.6: `./scripts/set-hostname.sh auto` |
+| `set-hostname.sh auto` says "This network does not resolve sslip.io names" | Your company DNS blocks public wildcard DNS services | Try `./scripts/set-hostname.sh auto --service nip.io`, try off VPN, or see "Your own DNS service" in [Appendix F](#appendix-f---change-the-hostname). Nothing was changed. |
+| After changing the hostname, the login page shows "Invalid redirect URI" or loops back to the old name | The login service still has the old hostname registered | Tell your instructor. Switch back with `./scripts/set-hostname.sh set <old hostname>`. See the note in [Appendix F](#appendix-f---change-the-hostname). |
 | `up` prints a warning that the URL "did not answer from this machine yet" | Option A: DNS has not spread yet, or your IP is not the allowed one | The deployment is complete. Wait two minutes, run the checks in 2.5, then `status`. |
 | `preflight` fails on the Route 53 hosted zone | Option A: wrong `ROUTE53_ZONE_NAME` or `ROUTE53_HOSTED_ZONE_ID` | `aws route53 list-hosted-zones` and copy the right values |
 | `curl` reports a certificate error | Wrong hostname or stale certificate file | Repeat 2.8. The certificate is valid only for the exact `HOSTNAME`. |
@@ -1910,6 +1928,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 12. **Default-password check (Validate Section 2).** The check and the `Admin password` line in `status` post `admin` / `pass` to each realm's token endpoint and treat `HTTP 200` as "still accepted". Confirm both realms return 200 on an unprotected deployment and 401 after stage 7.
 13. **Stuck model pod recovery and node disk speed.** On a live run the Red Team model pod (26 GB image) sat in `CreateContainerError` with "context deadline exceeded" and "failed to reserve container name" events. It started after the node's root volume was raised to 6000 IOPS and 500 MiB/s with `aws ec2 modify-volume` and the pod was deleted. Both were done together, so which one was needed is not known. `up` now does both: it raises every node's root volume right after the cluster and node groups exist (`TUNE_NODE_VOLUMES`, `NODE_VOLUME_IOPS`, `NODE_VOLUME_THROUGHPUT`), and it deletes a model pod that has been in that state for 5 minutes, up to 3 times. Neither step has run on a live cluster as part of the script; the pod loop was tested against simulated pod states. Confirm on a live cluster that the `Node disks:` lines report each volume raised and that model pods start without a recycle. The volume change needs `ec2:ModifyVolume` and `ec2:DescribeVolumes`, is not part of the launch template, and so does not carry over to a replacement node until `up` runs again. Moving node group creation to an eksctl config file with `volumeIOPS` and `volumeThroughput` would make it permanent.
 14. **VPC limit and leftover stack checks, and the cost estimate.** A second student in a shared account hit "The maximum number of VPCs has been reached", then "Stack already exists", then termination protection on the leftover stack. `preflight` now fails early on both conditions and prints the commands to fix them. Both checks were tested against simulated AWS responses only. Before class in a shared account, raise "VPCs per Region" to the number of students plus the VPCs already there. `scripts/cost-estimate.sh` uses built-in us-east-1 list prices recorded on 2026-11-20 unless the role has `pricing:GetProducts`; the live price lookup was tested against a simulated response only. Check the built-in prices against the AWS pricing pages before quoting a class budget.
+15. **Changing the hostname (option C in 2.6, Appendix F).** `scripts/set-hostname.sh` and the `hostname` action were tested with stand-in tools only, not on a live cluster, and the sandbox could not resolve `sslip.io`, so the success path of `auto` has not run at all. Confirm on a live cluster that after `set-hostname.sh auto` (a) the platform restarts with the new base URL, (b) the login page works under the new name, meaning the login service accepts the new redirect address and does not keep the hostname from the first install, (c) API calls with existing project tokens work, and (d) the chosen `sslip.io` name resolves on the class network. If (b) fails, do not offer option C after deployment; instead pick the hostname before the first `up`. Company DNS servers often block `sslip.io` and `nip.io`, so test from the network students will use.
 
 ### Class logistics
 
@@ -2183,3 +2202,64 @@ The first line must show your own values, not `CHANGEME` or defaults you had rep
 - **A script update does not change a running deployment.** New script behavior applies the next time you run a command such as `up` or `allowed-ips.sh`.
 - **The multi-agent app is a separate repository.** Update it the same way if your instructor asks: `cd ~/f5-ai-lab/f5-ai-sec-multi-agent-system-app && git pull`. Its `.env.baseline` and `.env.protected` files are ignored by git and are left alone.
 - **Backups contain secrets.** The `lab.env.bak-*` files hold the same keys and tokens as `lab.env`. Delete them when you no longer need them, and at cleanup.
+
+## Appendix F - Change the hostname
+
+The platform is reached by one hostname, set as `HOSTNAME` in `config/guardrails-poc.env` and as `F5_HOST` in `lab.env`. The certificate, the ingress rule, and the platform's own base URL all use it. `scripts/set-hostname.sh` changes all of them together on a running deployment.
+
+Use it when you cannot edit your hosts file, or when you want to move to a name in a DNS service you manage.
+
+### See the current state
+
+```bash
+./scripts/set-hostname.sh show
+```
+
+It prints the current hostname, the load balancer's DNS name and IP addresses, whether the hostname resolves from your machine, and the name that `auto` would choose.
+
+### A public wildcard DNS name (no setup)
+
+`sslip.io` and `nip.io` are free public DNS services. They answer any name that contains an IP address with that address, so `guardrails.203-0-113-10.sslip.io` resolves to `203.0.113.10`. Nothing has to be registered.
+
+```bash
+./scripts/set-hostname.sh auto
+```
+
+The script finds the load balancer's addresses, picks one that answers, checks that your network can resolve the new name, and only then makes the change. To use the other service:
+
+```bash
+./scripts/set-hostname.sh auto --service nip.io
+```
+
+Limits to know about:
+
+- **Company DNS may block these services.** If so, the script stops before changing anything and says so.
+- **The name points at one load balancer address.** If AWS replaces that address, which is rare during a lab, run `./scripts/set-hostname.sh auto` again.
+- **The name contains your load balancer's IP address.** Access is still limited to the addresses you allowed in step 2.5.
+- **The DNS lookup goes to a third party.** Only the hostname is sent to it, never your traffic. Do not use these services outside a lab.
+
+### Your own DNS service
+
+If you manage a domain in any DNS service, create a CNAME record from the hostname you want to the load balancer DNS name that `show` prints. Then:
+
+```bash
+./scripts/set-hostname.sh set guardrails.lab.example.com
+```
+
+The script warns you if the name does not resolve to the load balancer yet, and continues.
+
+### After any hostname change
+
+1. Reload your values:
+
+   ```bash
+   source ~/f5-ai-lab/lab.env
+   ```
+
+2. Save the lab certificate again (step 2.8). The certificate is issued for the exact hostname, so the old file no longer matches.
+3. If you added a hosts file entry for the old name, remove it and run `unset F5_LB_IP`.
+4. If the LobeChat containers or the multi-agent app are running, start them again (steps 4.1 and 5.4) so they use the new name.
+
+Your admin password, Bedrock connection, projects, and project tokens are unchanged.
+
+> **Not yet confirmed on a live cluster:** whether the login page accepts a hostname that differs from the one used at first install. If login fails with "Invalid redirect URI" after a change, switch back with `./scripts/set-hostname.sh set <old hostname>` and tell your instructor.

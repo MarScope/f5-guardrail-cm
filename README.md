@@ -126,11 +126,25 @@ Use the script for normal PoC lifecycle operations.
 | `up` | Deploy, or continue a partial deployment |
 | `status` | Print a health summary |
 | `access` | Re-apply the allowed source addresses, for example after your IP changes. See `scripts/allowed-ips.sh` to view and edit the list. |
+| `hostname` | Re-apply `HOSTNAME` to a running deployment after it changes. See `scripts/set-hostname.sh`. |
 | `down` | Delete the environment. Asks you to type `DELETE` unless `--yes` is given. |
 
 Options: `--config FILE` uses a config file other than `config/guardrails-poc.env`. `--dry-run` prints the commands `up`, `down`, `status`, or `access` would run without changing anything. If `config/guardrails-poc.env` does not exist, the script falls back to the example file.
 
 The script is idempotent. If deployment stops partway through, rerun `up`; it reuses existing AWS and Kubernetes resources and continues from the current state.
+
+### Change the Hostname
+
+`scripts/set-hostname.sh` changes the hostname of a running deployment: `HOSTNAME` in the config, `F5_HOST` in `lab.env`, the platform base URL, the certificate, and the ingress rule. It then runs the `hostname` action of `guardrails-poc.sh`.
+
+```bash
+./scripts/set-hostname.sh show                              # current name, load balancer DNS name and addresses
+./scripts/set-hostname.sh auto                              # use a public wildcard DNS name (sslip.io), no hosts file needed
+./scripts/set-hostname.sh auto --service nip.io
+./scripts/set-hostname.sh set guardrails.lab.example.com    # a name in your own DNS service (CNAME to the load balancer)
+```
+
+Not yet run against a live cluster. In particular, it is unconfirmed whether the platform's login page accepts a hostname different from the one used at first install.
 
 ### Estimate the Cost
 
