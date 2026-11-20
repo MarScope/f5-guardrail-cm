@@ -85,6 +85,7 @@ Usage:
   scripts/guardrails-poc.sh [--config FILE] [--dry-run] down [--yes]
   scripts/guardrails-poc.sh [--config FILE] [--dry-run] status
   scripts/guardrails-poc.sh [--config FILE] [--dry-run] access
+  scripts/guardrails-poc.sh [--config FILE] [--dry-run] hostname
 
 Secret inputs:
   Harbor:
@@ -103,6 +104,11 @@ Access control:
   The initial admin password is replaced before the ingress is created. The new
   password comes from GUARDRAILS_ADMIN_PASSWORD or ADMIN_PASSWORD_FILE; if
   neither exists a random one is generated and saved to ADMIN_PASSWORD_FILE.
+
+Hostname:
+  After changing HOSTNAME in the config, run `hostname` to re-apply it to a
+  running deployment (platform base URL, TLS certificate, ingress). See
+  scripts/set-hostname.sh, which changes the setting and applies it in one step.
 
 Examples:
   cp config/guardrails-poc.env.example config/guardrails-poc.env
@@ -133,7 +139,7 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
-    preflight|up|down|status|access)
+    preflight|up|down|status|access|hostname)
       ACTION="$1"
       shift
       ;;
@@ -2193,6 +2199,39 @@ status() {
   fi
 }
 
+# Re-apply HOSTNAME to a running deployment: the platform's base URL, the
+# self-signed certificate, the ingress rule, and the DNS record when Route 53
+# is managed. Used after HOSTNAME changes, for example by set-hostname.sh.
+do_hostname() {
+  require_tools
+  if [[ "$DRY_RUN" == true ]]; then
+    apply_security_operator
+    RECREATE_TLS_SECRET=true create_tls_secret
+    apply_ingress
+    route53_upsert "<ingress-load-balancer>"
+    return
+  fi
+
+  cluster_exists || die "EKS cluster not found: $CLUSTER_NAME in $AWS_REGION"
+  aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null
+  kubectl get svc -n "$INGRESS_NAMESPACE" "$INGRESS_CONTROLLER_SERVICE" >/dev/null 2>&1 \
+    || die "Ingress controller service not found. Run ./scripts/guardrails-poc.sh up first."
+
+  log "Applying hostname $HOSTNAME to the platform, certificate, and ingress"
+  apply_security_operator
+  RECREATE_TLS_SECRET=true create_tls_secret
+  apply_ingress
+  local lb
+  lb="$(get_ingress_lb || true)"
+  [[ -z "$lb" ]] || route53_upsert "$lb"
+
+  log "Waiting for the platform to restart with the new base URL"
+  sleep 20
+  kubectl rollout status -n "$MODERATOR_NAMESPACE" deploy/cai-moderator --timeout=600s \
+    || log "WARNING: the platform had not finished restarting after 10 minutes. Check: kubectl get pods -n $MODERATOR_NAMESPACE"
+  status_line "UI" "https://$HOSTNAME"
+}
+
 load_config
 init_colors
 
@@ -2202,5 +2241,6 @@ case "$ACTION" in
   down) do_down ;;
   status) require_tools; status ;;
   access) do_access ;;
+  hostname) do_hostname ;;
   *) die "Unknown action: $ACTION" ;;
 esac
