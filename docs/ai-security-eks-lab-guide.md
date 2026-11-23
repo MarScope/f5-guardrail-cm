@@ -21,9 +21,9 @@ Hands-on lab: deploy F5 AI Security (Guardrails) on Amazon EKS, connect it to a 
 - [Section 5 - Install and test the multi-agent workflow app](#section-5---install-and-test-the-multi-agent-workflow-app)
 - [Cleanup](#cleanup)
 - [Troubleshooting](#troubleshooting)
-- [Appendix A - Bedrock through a custom Converse connection](#appendix-a---bedrock-through-a-custom-converse-connection)
+- [Appendix A - Other ways to connect Bedrock](#appendix-a---other-ways-to-connect-bedrock)
 - [Appendix B - Instructor notes](#appendix-b---instructor-notes)
-- [Appendix C - Diagnose a Bedrock API key](#appendix-c---diagnose-a-bedrock-api-key)
+- [Appendix C - Troubleshoot the Bedrock connection](#appendix-c---troubleshoot-the-bedrock-connection)
 - [Appendix D - Change who can reach the platform](#appendix-d---change-who-can-reach-the-platform)
 - [Appendix E - Update your copy of the lab material](#appendix-e---update-your-copy-of-the-lab-material)
 - [Appendix F - Change the hostname](#appendix-f---change-the-hostname)
@@ -91,8 +91,8 @@ sequenceDiagram
   alt Prompt blocked
     F-->>C: Error: blocked. Bedrock is never called.
   else Prompt allowed
-    F->>B: POST /openai/v1/chat/completions<br/>Authorization: Bearer Bedrock API key
-    B-->>F: Chat completion
+    F->>B: POST /model/MODEL/converse<br/>Signed with your AWS credentials
+    B-->>F: Model reply
     F->>S: Scan the response
     S-->>F: Verdict
     alt Response blocked or redacted
@@ -117,7 +117,7 @@ Clients in this lab use the **chat completions** API, the same API type they wou
 | Key | Provider API key | F5 project token |
 | Request and response body | OpenAI chat completions format | Identical |
 
-F5 AI Security also talks to Bedrock with chat completions, so the format is the same on both sides.
+Behind that endpoint, F5 AI Security calls Bedrock with Bedrock's own Converse API and signs each request with AWS credentials. Clients never see that side. They send and receive chat completions.
 
 **This lab does not use the Scan API.** The Scan API is a separate, out-of-band interface where an application sends text to be checked and then calls the model itself. It requires changes to application code. Nothing in this guide calls it: LobeChat, the multi-agent app, and the `curl` tests all send ordinary chat completions requests.
 
@@ -377,13 +377,13 @@ What the lab does in AWS, and the permissions behind each action:
 | Reads the GPU and VPC limits and requests an increase | Step 1.5, preflight | Service Quotas | `servicequotas:GetServiceQuota`, `ListServiceQuotas`, `RequestServiceQuotaIncrease` |
 | Looks up current server prices for the cost estimate (optional; built-in prices are used without it) | Step 2.3 | AWS Price List | `pricing:GetProducts` |
 | Creates a DNS record | Section 2, DNS option A only | Route 53 | `route53:ListHostedZones`, `ListHostedZonesByName`, `ListResourceRecordSets`, `ChangeResourceRecordSets`, `GetChange` |
-| Calls the Bedrock model, and creates a short-term Bedrock API key | Step 1.6, Sections 3-5 | Bedrock | `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`, `bedrock:CallWithBearerToken`, and read access to the Bedrock console. A short-term key can do only what your role can do, so your role needs these. |
-| Creates a long-term Bedrock API key | Step 3.1, fallback only | IAM | Create an IAM user, attach only `AmazonBedrockLimitedAccess` to it, and create a Bedrock service credential. Not needed if you use a short-term key. |
+| Calls the Bedrock model | Step 1.6, Sections 3-5 | Bedrock | `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream`. F5 AI Security uses your own credentials, so your role needs these. For a model ID that starts with `us.`, the permission must cover the inference profile and the model in every US region it routes to. |
+| Uses one of the other connection methods | [Appendix A](#appendix-a---other-ways-to-connect-bedrock) only | Bedrock, IAM | A Bedrock API key needs `bedrock:CallWithBearerToken` and read access to the Bedrock console. A long-term API key or a dedicated access-key user needs permission to create IAM users. Not needed for the default method. |
 
 Notes on set 2:
 
 - The policy file combines the minimum policies that the `eksctl` documentation publishes with the extra calls this lab makes. It has not been run end to end. If a step fails with `AccessDenied`, the error names the missing action. Add it, or fall back to set 1.
-- The three `LabBedrockApiKey...` statements in the file are needed only for the long-term key fallback in step 3.1. If students use short-term keys, which is the default, remove them. They let a role create IAM users, which many organizations do not allow.
+- The three `LabBedrockApiKey...` statements in the file are needed only for a long-term Bedrock API key (Appendix A, option 2). Remove them otherwise. They let a role create IAM users, which many organizations do not allow.
 - Reference for the `eksctl` policies: <https://docs.aws.amazon.com/eks/latest/eksctl/minimum-iam-policies.html>
 
 > **Use one AWS identity for the whole lab.** Only the identity that creates the cluster can run `kubectl` against it. If you create the cluster with one role and come back with another, `kubectl` and the script are refused.
@@ -597,6 +597,7 @@ You are done with step 1.4. Go to step 1.5.
 
 | What you see | What it means | What to do |
 | --- | --- | --- |
+| `aws configure sso` fails with `InvalidRequestException` on `RegisterClient` | The SSO region you entered is wrong. It is where your sign-in directory lives, not where your models run. | Find it with the region finder in [Appendix C](#appendix-c---troubleshoot-the-bedrock-connection), then run `aws configure sso` again |
 | `Unable to locate credentials` | The command line is not signed in | Method 1: run `source ~/f5-ai-lab/lab.env`, then `aws sso login --profile f5-ai-lab`. Method 2: paste the keys again. Method 3: run `aws configure` again. |
 | A message about an expired or invalid token | Your session ended | Method 1: `aws sso login --profile f5-ai-lab`. To see the expiry time, use the `jq` commands under "Check when your sign-in expires" above. Method 2: copy fresh keys from the portal. |
 | The wrong `Account` number | Another sign-in is taking priority | Run `env | grep '^AWS_'`. Remove anything you did not set in this step with `unset NAME`, or open a new terminal. |
@@ -630,7 +631,7 @@ The first number must be larger than the second. In a shared account it must be 
 
 ### 1.6 Check that you can call the Bedrock model
 
-In Section 3 you will create a short-term Bedrock API key so that F5 AI Security can call the model. A short-term key can do only what your own AWS role can do. So before the hour-long deployment, confirm that your role is allowed to use the model.
+In Section 3 you will give F5 AI Security the credentials of your own AWS sign-in so that it can call the model as you. It can then do only what your role can do. So before the hour-long deployment, confirm that your role is allowed to use the model.
 
 ```bash
 aws bedrock-runtime converse \
@@ -649,11 +650,11 @@ It should print a short greeting from the model.
 | `ValidationException` naming the model | The model is not offered in this region | Ask your instructor which region to use, then run `labvar BEDROCK_REGION <region>` and try again |
 | An expired-token message | Your AWS sign-in ran out | Sign in again as in step 1.4, then try again |
 
-You do not create the API key yet. A short-term key lasts 12 hours at most and often much less, so you create it at the start of Section 3, right before it is needed.
+You do not hand over the credentials yet. They expire, so you do that at the start of Section 3, right before they are needed.
 
 #### Optional - use a different Bedrock model
 
-The lab's default model is `openai.gpt-oss-120b-1:0`. Your instructor may ask you to use another one. To see what you are currently set to:
+The lab's default model is `us.amazon.nova-lite-v1:0`, Amazon Nova Lite. The `us.` prefix means it is an **inference profile** that routes requests across US regions, so `BEDROCK_REGION` must be a US region. Your instructor may ask you to use another model. To see what you are currently set to:
 
 ```bash
 echo "Model: $BEDROCK_MODEL   Region: $BEDROCK_REGION"
@@ -663,8 +664,8 @@ echo "Model: $BEDROCK_MODEL   Region: $BEDROCK_REGION"
 
 | Requirement | Why | Where to check |
 | --- | --- | --- |
-| The **Chat Completions** API | Every client in this lab, and F5 AI Security itself, speaks chat completions | [API compatibility by models](https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html) |
-| Hosted on the **`bedrock-runtime`** endpoint | That is the endpoint this guide's URLs point at | [Endpoint availability by models](https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html) |
+| The **Converse** API | The lab's connection template calls Bedrock through Converse | [API compatibility by models](https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html) |
+| A reply whose first part is text | The template reads the first part of the model's reply. Some reasoning models, the `openai.gpt-oss` family among them, can put their reasoning first, and the answer then comes back empty. | The second check at the end of this step |
 | **Tool calling** (function calling) | The multi-agent app in Section 5 forces tool calls and asks for JSON output | The model's card |
 | Available in your region, to your role | Otherwise calls are refused | The check at the end of this step |
 
@@ -679,29 +680,31 @@ echo "Model: $BEDROCK_MODEL   Region: $BEDROCK_REGION"
     --query 'modelSummaries[].[modelId,providerName,modelName]' --output table
   ```
 
-  This shows what exists in the region. It does not tell you whether a model supports chat completions or tool calling, so still check the two documentation pages in the table above.
+  This shows what exists in the region. It does not tell you whether a model supports Converse or tool calling, so still check the documentation page in the table above.
 
 Some models are called through an **inference profile**, whose ID has a region-group prefix such as `us.` in front of the model ID. If a model's card shows an ID in that form, use it exactly as shown.
 
 **Set the model and test it.** Replace the example ID with the one you chose:
 
 ```bash
-labvar BEDROCK_MODEL openai.gpt-oss-20b-1:0
-
-aws bedrock-runtime converse \
-  --region "$BEDROCK_REGION" \
-  --model-id "$BEDROCK_MODEL" \
-  --messages '[{"role":"user","content":[{"text":"Say hello in five words."}]}]' \
-  --query 'output.message.content[].text' --output text
+labvar BEDROCK_MODEL us.amazon.nova-pro-v1:0
 ```
 
-A greeting means your role can call the new model. Step 3.1 then tests it through the chat completions endpoint before anything is connected to it.
+```bash
+aws bedrock-runtime converse --region "$BEDROCK_REGION" --model-id "$BEDROCK_MODEL" --messages '[{"role":"user","content":[{"text":"Say hello in five words."}]}]' --query 'output.message.content[].text' --output text
+```
+
+```bash
+aws bedrock-runtime converse --region "$BEDROCK_REGION" --model-id "$BEDROCK_MODEL" --messages '[{"role":"user","content":[{"text":"Say hello in five words."}]}]' --query 'keys(output.message.content[0])' --output text
+```
+
+The first check should print a greeting, which means your role can call the new model. The second should print `text`. If it prints something else, such as `reasoningContent`, the model puts something other than text first and will not work with the lab's connection template.
 
 **If you change the model later in the lab,** run `labvar BEDROCK_MODEL <model ID>` and then update whatever already exists:
 
 | If you have already done | Also do this |
 | --- | --- |
-| Step 3.2, the F5 connection | In the F5 AI Security UI, go to **Configuration > Connections**, open the three-dot menu on the `bedrock-lab` connection, select **Manage model**, change **Model name**, and select **Test and connect** |
+| Step 3.2, the F5 connection | In the F5 AI Security UI, go to **Configuration > Connections**, open the three-dot menu on the `bedrock-lab` connection, select **Manage model**, change `modelId` in the inputs (and `awsRegion` if the region changed), and select **Test and connect** |
 | Step 4.1, the LobeChat containers | Run the whole block in step 4.1 again. It recreates both containers with the new model. |
 | Step 5.3 and 5.4, the multi-agent app | Run the `make_env` block in step 5.3 again, stop both copies with `Ctrl+C`, and start them again as in step 5.4 |
 
@@ -1165,123 +1168,132 @@ Start in a terminal where you have run `source ~/f5-ai-lab/lab.env`.
 
 All steps are in the F5 AI Security UI unless a command is shown.
 
-### 3.1 Create a short-term Bedrock API key
+### 3.1 Check the AWS credentials you will hand over
 
-F5 AI Security needs a Bedrock API key to call the model. You create a **short-term** key. It needs no special permissions, because it simply acts as you.
+F5 AI Security calls Bedrock with AWS credentials, the same kind your own command line uses. You give it the credentials of your current AWS sign-in from step 1.4. Nothing new is created in AWS and no extra permission is needed, because the platform simply acts as you.
 
-Know its limits before you start:
+Know the limits before you start:
 
-- **It expires.** The key stops working when the AWS console session you created it in ends, and after 12 hours at the latest.
-- **It works in one region only**, the one selected in the console when you create it.
-- **When it expires, every client fails at once**, because they all reach the model through this one key. The fix takes two minutes and is described in "When the key expires" below.
+- **They expire.** Credentials from sign-in methods 1 and 2 last as long as your AWS session, which your administrator sets between 1 and 12 hours. Method 3 keys do not expire.
+- **When they expire, every client fails at once**, because they all reach the model through this one connection. The fix takes a few minutes and is described in "When the credentials expire" below.
+- **They can do whatever your role can do.** That is acceptable for a short lab in a lab account. Outside a lab, use credentials that can do nothing except call Bedrock. See [Appendix A](#appendix-a---other-ways-to-connect-bedrock).
 
-To get the longest life from the key, start with a fresh console session.
-
-1. Sign out of the AWS console (and your company's access portal, if you use one), then sign in again.
-2. Open the Amazon Bedrock console **in your Bedrock region**. Run this in your terminal and open the address it prints in your browser:
+1. Check which model and region you are set to:
 
    ```bash
-   echo "https://${BEDROCK_REGION}.console.aws.amazon.com/bedrock/home?region=${BEDROCK_REGION}"
+   echo "Model: $BEDROCK_MODEL   Region: $BEDROCK_REGION"
    ```
 
-3. **Check the region in the browser's address bar.** This is the most common mistake in this step. The key works only in the region where it is created, and the console may have switched to a different region than you expect. With the default region, the address must look like this:
-
-   ```text
-   https://us-east-1.console.aws.amazon.com/bedrock/home?region=us-east-1#/...
-   ```
-
-   The region appears twice: at the very start of the address, and after `region=`. Both must match the value printed by `echo $BEDROCK_REGION`. If they do not, choose the correct region in the selector at the top right of the console, then look at the address bar again.
-4. In the left menu, select **API keys**.
-5. Select the **Short-term API keys** tab. Look at the address bar one more time to confirm the region, then select **Generate short-term API keys**.
-6. Copy the key. It is long, around three thousand characters. That is normal.
-7. In your terminal, save it. The command asks you to paste the key and does not display it:
+   With the defaults it prints `us.amazon.nova-lite-v1:0` and `us-east-1`. If it prints an `openai.gpt-oss` model, your `lab.env` came from an earlier version of the lab. Switch to the current default, which is the model the connection template was confirmed with:
 
    ```bash
-   labvar BEDROCK_API_KEY
+   labvar BEDROCK_MODEL us.amazon.nova-lite-v1:0
    ```
 
-8. Note the time. Write down when you created the key so you can tell later whether it might have expired.
-9. Check that the key works by calling Bedrock directly:
+2. See what your current sign-in provides and how long it has left. This shows lengths and times only, never the values:
 
    ```bash
-   echo "region=[$BEDROCK_REGION] model=[$BEDROCK_MODEL] key length=${#BEDROCK_API_KEY}"
-
-   curl -sS -w '\nHTTP %{http_code}\n' \
-     "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions" \
-     -H "Authorization: Bearer ${BEDROCK_API_KEY}" \
-     -H "Content-Type: application/json" \
-     -d '{"model":"'"${BEDROCK_MODEL}"'","messages":[{"role":"user","content":"Say hello in five words."}]}'
+   ./scripts/bedrock-creds.sh check
    ```
 
-   This is the same chat completions call that F5 AI Security will make. It prints Bedrock's reply in full, followed by the HTTP status. It does not print your key.
+   If the time left is shorter than the rest of the class, sign in again first (step 1.4, for example `aws sso login --profile "$AWS_PROFILE"`), then run the check again.
 
-   **Success** is `HTTP 200` and a reply that contains `"choices"` with a short greeting inside it.
+3. Confirm that these credentials can call the model. This is the same check as step 1.6:
 
-   Anything else is an error, and the reply says what went wrong. If the cause is not obvious, [Appendix C](#appendix-c---diagnose-a-bedrock-api-key) inspects the key for you.
+   ```bash
+   aws bedrock-runtime converse --region "$BEDROCK_REGION" --model-id "$BEDROCK_MODEL" --messages '[{"role":"user","content":[{"text":"Say hello in five words."}]}]' --query 'output.message.content[].text' --output text
+   ```
 
-   | What you see | Likely cause | What to do |
+   A short greeting means the credentials, the region, and the model are all good. Do not go on until this works. If it fails here, nothing you enter in F5 AI Security will fix it.
+
+   | What you see | What it means | What to do |
    | --- | --- | --- |
-   | `key length=7` in the first line | The key was not saved. The value is still `NOT-SET`. | Run `labvar BEDROCK_API_KEY` again and paste the key |
-   | `Authentication failed: Please make sure your API Key is valid.` | Most often the key was created in a different region. A short-term key works only in the region shown in the console's address bar when you created it. It can also mean the key expired or was not copied whole. | Run the checks in [Appendix C](#appendix-c---diagnose-a-bedrock-api-key). They show which region the key belongs to and when it was created. Then create a new key in the right region. |
-   | `HTTP 403` with "not authorized" or "access denied" | Your role lacks `bedrock:InvokeModel` or `bedrock:CallWithBearerToken`, or your organization blocks Bedrock API keys | Give the full reply to your AWS administrator. See step 1.4, Part A. |
-   | `HTTP 400` or `404` that names the model | The model is not available to your account in this region, or is not served on this endpoint | See "Optional - use a different Bedrock model" in step 1.6 |
-
-Keep the console tab open. You need the key again in step 3.2.
-
-Reference: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-generate.html>
-
-#### When the key expires
-
-You will know because every prompt starts failing in every client at the same moment, in both the baseline and protected projects, and the direct `curl` check in step 9 returns `HTTP 401` or `403` instead of `HTTP 200`. To renew:
-
-1. Repeat steps 1 to 9 above to create and save a new key.
-2. In the F5 AI Security UI, go to **Configuration > Connections**. Open the three-dot menu on the `bedrock-lab` connection and select **Manage model**.
-3. Replace the **API key** with the new key and select **Test and connect**.
-
-Nothing else changes. LobeChat and the multi-agent app use F5 project tokens, not the Bedrock key, so they work again immediately without a restart. You will also do this at the start of each new day if you continue with follow-on labs.
-
-#### Fallback - a long-term key
-
-Use a long-term key only if your instructor tells you to, for example when console sessions in your account are too short for the lab. A long-term key lasts until its expiry date and is backed by an IAM user, so creating one needs permission to create IAM users. Many accounts do not allow that, in which case an administrator creates the key and gives it to you.
-
-1. Follow steps 2 to 4 above.
-2. Select the **Long-term API keys** tab, then **Generate long-term API keys**.
-3. Under **API key expiration**, choose the shortest period that covers the lab.
-4. Leave **Advanced permissions** as it is and select **Generate**.
-5. Copy the key. This is the only time it is shown.
-6. Continue from step 7 above.
-
-If you were handed a key instead of creating one, start at step 7 above.
+   | `AccessDeniedException` | Your role may not call that model, or an organization policy blocks it | Give the full error to your AWS administrator. For a model ID that starts with `us.`, the permission must cover the model in every US region it routes to. |
+   | `ValidationException`, or the model is not found | The model is not offered in that region | Ask your instructor which region to use, then `labvar BEDROCK_REGION <region>` |
+   | An expired or invalid token message | Your AWS sign-in ran out | Sign in again as in step 1.4 |
 
 ### 3.2 Add the Bedrock connection
 
-Bedrock exposes a chat completions endpoint, so you use the built-in **OpenAI Compatible** connection type. F5 AI Security then speaks chat completions on both sides: to your clients and to Bedrock.
+You create a **custom connection** from a template that ships with the lab, `config/bedrock-converse-template.yaml`. The template tells F5 AI Security how to call Bedrock's Converse API and how to sign each request with your AWS credentials. Your clients are not affected by this: they still call F5 AI Security with chat completions.
+
+The credentials are stored as six **secrets**. The session token is about 1,000 characters long, and the platform's secret field cuts long values short, so the token is entered in four pieces that the template joins back together. A helper script does the splitting and copying for you.
+
+> Menu and field names differ a little between releases. If a name below does not match your screen, look for the equivalent: a custom provider that takes a YAML template, a list of secrets, and a list of inputs.
 
 1. In the menu under **Configuration**, select **Connections**.
-2. On the **Models** tab, find **OpenAI Compatible** and select **Add**.
-3. In your terminal, print the values to type into the form. They come from `lab.env`, so they match what the rest of the lab uses:
+2. On the **Models** tab, select **Add other providers**.
+3. Set **Provider name** to `bedrock`. Set **Model display name** to your connection name, which this prints. With the defaults it is `bedrock-lab`:
 
    ```bash
-   echo "Display name: $F5_CONNECTION"
-   echo "Model name:   $BEDROCK_MODEL"
-   echo "URL:          https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions"
+   echo "$F5_CONNECTION"
    ```
 
-4. Fill in the form:
+4. Copy the template to your clipboard:
 
-   | Field | Value |
+   ```bash
+   ./scripts/bedrock-creds.sh template
+   ```
+
+   Paste it into the YAML configuration box, replacing everything that is there. Do not edit it. If the form offers its own authentication settings, leave them empty. The template does the signing.
+
+5. Create six secrets with exactly these names. Names are case sensitive. A name that does not match is treated as empty, and the test then fails with a token error.
+
+   | Secret name | What goes in it |
    | --- | --- |
-   | **Display name** | The `Display name` printed above. With the defaults it is `bedrock-lab`. |
-   | **Model name** | The `Model name` printed above. With the defaults it is `openai.gpt-oss-120b-1:0`. It is case-sensitive. |
-   | **API key** | The Bedrock API key from step 3.1. Paste it from the console tab you left open. |
-   | **URL** | The `URL` printed above |
-   | **Endpoint** | Chat completions (cannot be changed later) |
+   | `awsAccessKeyId` | Your access key ID: 20 characters, starting with `ASIA` for a temporary sign-in |
+   | `awsSecretAccessKey` | Your secret access key: 40 characters |
+   | `awsSessionTokenPart1` | Session token, first piece |
+   | `awsSessionTokenPart2` | Session token, second piece |
+   | `awsSessionTokenPart3` | Session token, third piece |
+   | `awsSessionTokenPart4` | Session token, the rest |
 
-5. Select **Test and connect**.
+6. Fill the secrets. Run the helper and follow it. It puts one value on your clipboard at a time, tells you which secret to paste it into, and waits for you to press Enter. It never displays a value:
 
-The platform sends the prompt "Hello there" to Bedrock. On success you see **Configuration Saved!** and the connection appears under **Model connections**. On failure nothing is saved. Expand **Error** to read why.
+   ```bash
+   ./scripts/bedrock-creds.sh
+   ```
 
-> The **Display name** becomes part of the URL that clients call: `https://<F5_HOST>/openai/<Display name>`. It is a label for the connection, not the model, so it stays the same if you change the model later.
+   Clear each field before you paste. Some forms add a paste to the old text instead of replacing it.
+
+7. Fill the inputs section. When the helper finishes, the inputs are on your clipboard and on your screen. They look like this:
+
+   ```text
+   modelId: us.amazon.nova-lite-v1:0
+   awsRegion: us-east-1
+   maxTokens: 2048
+   temperature: 0.2
+   topP: 0.9
+   ```
+
+   `modelId` and `awsRegion` come from `BEDROCK_MODEL` and `BEDROCK_REGION` in `lab.env`, and must be the same values that worked in step 3.1. The template also uses `prompt` and `memory`, which the platform supplies with each request.
+
+8. Select **Test and connect**.
+
+A good result is status `200` with the model's reply in `content`. The connection then appears under **Model connections**. On failure nothing is saved, and the result shows Bedrock's error.
+
+| The test shows | Meaning | Fix |
+| --- | --- | --- |
+| `403` and `UnrecognizedClientException`, "The security token included in the request is invalid" | The access key ID or the session token did not arrive intact, or the credentials expired | Check the six secret names, then run `./scripts/bedrock-creds.sh` again and refill all six |
+| `403` and `InvalidSignatureException` | The key and token were accepted. The secret access key is wrong. | Clear `awsSecretAccessKey` completely and paste it again |
+| `403` and `AccessDeniedException` | The credentials are valid but may not call this model | Compare `modelId` and `awsRegion` with the values that worked in step 3.1 |
+| The same failure after you changed something | You may be looking at an earlier result | Run the test again and compare the `Date` and `x-amzn-RequestId` values with the previous result |
+
+More cases, and what to do when the cause is not obvious, are in [Appendix C](#appendix-c---troubleshoot-the-bedrock-connection).
+
+> **Keep these values private.** Do not paste AWS credentials into chat tools, tickets, or AI assistants. Be careful with error text too: an `InvalidSignatureException` reply from AWS contains your full session token. Remove it before you share the error with anyone.
+
+> The **Model display name** becomes part of the URL that clients call: `https://<F5_HOST>/openai/<Model display name>`. It is a label for the connection, not the model, so it stays the same if you change the model later.
+
+#### When the credentials expire
+
+You will know because every prompt starts failing in every client at the same moment, in both the baseline and protected projects, and `./scripts/bedrock-creds.sh check` shows the credentials have expired. To refresh:
+
+1. Sign in to AWS again as in step 1.4, for example `aws sso login --profile "$AWS_PROFILE"`.
+2. In the F5 AI Security UI, go to **Configuration > Connections**. Open the three-dot menu on the `bedrock-lab` connection and select **Manage model**.
+3. Run `./scripts/bedrock-creds.sh` and replace **all six** secrets. Every one of them changes with each sign-in, so replacing only the token is not enough.
+4. Select **Test and connect**.
+
+Nothing else changes. LobeChat and the multi-agent app use F5 project tokens, not AWS credentials, so they work again immediately without a restart. You will also do this at the start of each new day if you continue with follow-on labs.
 
 ### 3.3 Create the baseline project
 
@@ -1496,6 +1508,8 @@ Discussion point: in the baseline tab the model may refuse prompts 2 and 3 by it
 
 **Goal:** see guardrails protect an agentic workflow, where the attack arrives inside a tool result instead of from the user.
 
+> **Ask your instructor before you start this section.** The app depends on the model returning tool calls. The Bedrock connection from step 3.2 sends a prompt and returns text, and it has not been confirmed that tool calls pass through it. If the happy path in step 5.5 fails with a model or tool error, that is the reason, and the app's mock mode in step 5.2 still shows the workflow.
+
 The app is a demo financial advisor with two agents:
 
 - `advisor_orchestrator` reads the request and writes a plan.
@@ -1704,7 +1718,7 @@ After `down`, `status` must show `Environment: stopped` and `EBS volumes: none f
 
 Then:
 
-- Bedrock API key: a short-term key expires by itself. If you used the long-term fallback, delete the key in the AWS console under **Amazon Bedrock > API keys > Long-term API keys**.
+- AWS credentials in the Bedrock connection: temporary ones expire by themselves, and the teardown destroys the platform that stored them. If you used a long-lived access key or a Bedrock API key (Appendix A), deactivate or delete it in the AWS console.
 - AWS access from step 1.4. Method 1: `aws sso logout`. Method 2: close the terminals; the keys expire by themselves. Method 3: in the AWS console go to **IAM > Users > your user > Security credentials**, and under **Access keys** choose **Actions > Deactivate**, then **Delete**.
 - Optional: remove the downloaded image with `docker image rm lobehub/lobe-chat:1.143.3`.
 - Option B: remove the line you added to `/etc/hosts` (and the Windows hosts file, if used). Option A: `down` already removed the DNS record.
@@ -1849,22 +1863,22 @@ done
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Every prompt fails in every client at once, including the baseline project | The short-term Bedrock key expired | Renew it: step 3.1, "When the key expires" |
-| The direct `curl` check in step 3.1 says `Authentication failed: Please make sure your API Key is valid.` | The key was created in a different region than `BEDROCK_REGION`, or it was not copied whole | Run [Appendix C](#appendix-c---diagnose-a-bedrock-api-key) to see which. Then create the key again, checking the region in the address bar as in step 3.1. |
-| The step 1.6 check works but the key gets an access error | Your role lacks `bedrock:CallWithBearerToken`, or the account blocks Bedrock API keys | Give the error text to your AWS administrator, or ask for a long-term key (step 3.1, fallback) |
-| **Test and connect** rejects the key or the field cuts it off | The short-term key is too long for the field in your release | Use a long-term key (step 3.1, fallback), which is much shorter |
-| Error says the model is not supported on this route | The model is served on a different Bedrock endpoint | Try the URL `https://bedrock-mantle.<region>.api.aws/v1/chat/completions` with model `openai.gpt-oss-120b` |
+| Every prompt fails in every client at once, including the baseline project | The AWS credentials in the Bedrock connection expired | Refresh them: step 3.2, "When the credentials expire" |
+| **Test and connect** fails | Depends on the error shown in the result | Use the table under step 3.2, then [Appendix C](#appendix-c---troubleshoot-the-bedrock-connection), which starts with three checks that show which side the problem is on |
+| **Test and connect** reports an invalid security token right after you pasted fresh values | A secret name does not match the template, or a field kept old text | Names are case sensitive: `awsAccessKeyId`, `awsSecretAccessKey`, `awsSessionTokenPart1` to `Part4`. Clear each field before pasting. |
+| The step 3.1 model check fails | The problem is in AWS, not in F5 AI Security | Use the table in step 3.1 |
+| You cannot find **Add other providers** or a place for the YAML template | Menu names differ in your release | Look for a custom provider or custom connection that accepts a YAML template. Tell your instructor what it is called. |
 | You need a different model, or the chosen one is not available | The default model does not suit your account or region | See "Optional - use a different Bedrock model" in step 1.6 |
-| **Test and connect** fails in F5 but the Section 1 check passes | Typo in **Model name** or **URL** | The URL must be the full path ending in `/chat/completions` |
+| The platform logs show nothing about a failed test | Normal at the default log level | The reason is in the test result on screen, not in the logs |
 | `ask` prints an invalid token error | Token pasted with a space or newline, or it expired | Generate a new project token (3.5) |
-| `ask` returns "not found" for the connection | `F5_CONNECTION` does not match the connection's **Display name** | Make them identical |
+| `ask` returns "not found" for the connection | `F5_CONNECTION` does not match the connection's **Model display name** | Make them identical |
 | Protected project does not block | Guardrail off, or set to audit | Revisit 3.4 |
 
 ### Section 4 - LobeChat
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| It worked earlier and now every message errors, in both tabs | The short-term Bedrock key expired | Renew it: step 3.1, "When the key expires". The containers do not need restarting. |
+| It worked earlier and now every message errors, in both tabs | The AWS credentials in the Bedrock connection expired | Refresh them: step 3.2, "When the credentials expire". The containers do not need restarting. |
 | Every message errors immediately | Container cannot resolve, reach, or trust the F5 hostname | `docker logs lobe-protected`. Check `--add-host` (option B needs `F5_LB_IP`), that your IP is still the allowed one (2.5), and the certificate mount. |
 | Certificate errors persist in `docker logs` | The image ignores the extra CA | For this lab only, recreate the container adding `-e NODE_TLS_REJECT_UNAUTHORIZED=0`. Never do this outside a lab. |
 | Model list is empty | `OPENAI_MODEL_LIST` not applied | Recreate the container. Settings from an older container can persist in the browser, so try a private window. |
@@ -1879,28 +1893,186 @@ done
 | `ModuleNotFoundError: No module named 'dotenv'` | `python-dotenv` not installed | `pip install python-dotenv` |
 | Startup error mentioning `CONNECTION-NAME` | `CALYPSOAI_BASE_URL` not loaded | Check the `--env-file` path |
 | Run returns `{"detail":"Connection error."}` | Hostname not resolving, your IP not allowed, or certificate not trusted | Check name resolution (2.6), that your IP is still the allowed one (2.5), and `SSL_CERT_FILE` in the env file. Open a fresh terminal so no old `SSL_CERT_FILE` overrides it. |
-| It worked earlier and now every run fails, in both copies | The short-term Bedrock key expired | Renew it: step 3.1, "When the key expires". The app does not need restarting. |
-| Happy path fails with a model or tool error | The model or connection does not support forced tool calls or JSON output | See Appendix B, item 2 |
+| It worked earlier and now every run fails, in both copies | The AWS credentials in the Bedrock connection expired | Refresh them: step 3.2, "When the credentials expire". The app does not need restarting. |
+| Happy path fails with a model or tool error | The Bedrock connection passes a prompt and returns text. It may not carry the tool calls and JSON output this app forces. | Tell your instructor. Mock mode (step 5.2) still shows the workflow. See Appendix B, item 2. |
 | App works but nothing appears in F5 logs | App is in mock mode | Mock mode only activates when no token is set. Check the env file. |
 
 ---
 
-## Appendix A - Bedrock through a custom Converse connection
+## Appendix A - Other ways to connect Bedrock
 
-Use this instead of 3.1 and 3.2 if you must authenticate to Bedrock with IAM access keys rather than a Bedrock API key.
+Section 3 connects Bedrock with the temporary credentials of your own AWS sign-in. Use one of these instead only if your instructor tells you to.
 
-1. **Configuration > Connections > Models > Add other providers**.
-2. **Provider name:** `bedrock`. **Model display name:** `bedrock-converse` (this is the connection name).
-3. On the **Connection settings** tab, set **Example configuration** to `bedrock-converse`.
-4. On the **YAML parameters** tab, set the model ID and any other non-secret values the template asks for.
-5. Back on **Connection settings**, set **Authentication type** to **AWS Sig V4** and fill in **Access Key**, **Secret Key**, **Service name** (`bedrock`), and **AWS Region**.
-6. Select **Test and connect**.
+### Option 1 - Long-lived access keys, same template
 
-Then run `labvar F5_CONNECTION bedrock-converse`.
+Use this when AWS sessions in your account are too short for the lab, or a test has to run unattended. The connection is the one from step 3.2. Only the credentials differ.
 
-With this path your clients still call F5 AI Security with chat completions, but F5 AI Security calls Bedrock with the Converse API, so the model side is no longer the same API type. This path is suitable for Sections 3 and 4. A custom connection maps a prompt to a text reply, and F5's documentation does not state that it carries OpenAI tool calls, which Section 5 depends on. Use the OpenAI Compatible connection from 3.2 for Section 5 unless you have tested otherwise.
+Long-lived keys do not expire by themselves. Anyone who gets a copy can call Bedrock as that user until the key is turned off. So:
 
-Reference: <https://docs.aisecurity.f5.com/onboarding/connections/connect-model-provider.html>
+- Use a dedicated IAM user that can do nothing except call Bedrock models. Never the root account, and never an administrator's keys.
+- Do not put the keys in `~/.bashrc`, `~/.zshrc`, a file in a repository, a chat tool, a ticket, or an AI assistant.
+- Deactivate the key when the lab ends. If you suspect a leak, deactivate it first and investigate afterwards.
+
+An administrator creates the user, because it needs permission to create IAM users. This policy is a starting point. Replace `ACCOUNT_ID`, and add a pair of lines for each additional model:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "bedrock:InvokeModel",
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0",
+        "arn:aws:bedrock:*:ACCOUNT_ID:inference-profile/us.amazon.nova-lite-v1:0"
+      ]
+    }
+  ]
+}
+```
+
+To use the keys:
+
+1. Sign your command line in with them as in step 1.4, method 3 (`aws configure`).
+2. Run the model check from step 3.1. A greeting means the keys and the policy are good.
+3. Follow step 3.2. `./scripts/bedrock-creds.sh` detects that there is no session token. The key ID starts with `AKIA`, and you leave `awsSessionTokenPart1` to `awsSessionTokenPart4` empty. If your release refuses to save an empty secret, tell your instructor, because the template then needs a small change.
+
+### Option 2 - The OpenAI Compatible connection with a Bedrock API key
+
+This was the lab's original method. F5 AI Security calls Bedrock's chat completions endpoint and authenticates with a Bedrock API key instead of AWS credentials.
+
+> **Known problem.** On a live run on 2026-11-20, **Test and connect** failed with a short-term Bedrock API key of 3,144 characters, although the same key, model, and URL worked when called directly with `curl`. The likely cause is that the platform's secret field cuts long values short, which is the same limit that makes step 3.2 split the session token. That cause was not confirmed. Expect this option to work only with a **long-term** key, which is much shorter, or on a release where your instructor has confirmed that a short-term key is accepted.
+
+This option needs a model that Bedrock serves through chat completions. Switch to one first:
+
+```bash
+labvar BEDROCK_MODEL openai.gpt-oss-120b-1:0
+```
+
+#### Create the key
+
+A **short-term** key needs no special permissions, because it simply acts as you.
+
+Know its limits before you start:
+
+- **It expires.** The key stops working when the AWS console session you created it in ends, and after 12 hours at the latest.
+- **It works in one region only**, the one selected in the console when you create it.
+- **When it expires, every client fails at once**, because they all reach the model through this one key. The fix takes two minutes and is described in "When the key expires" below.
+
+To get the longest life from the key, start with a fresh console session.
+
+1. Sign out of the AWS console (and your company's access portal, if you use one), then sign in again.
+2. Open the Amazon Bedrock console **in your Bedrock region**. Run this in your terminal and open the address it prints in your browser:
+
+   ```bash
+   echo "https://${BEDROCK_REGION}.console.aws.amazon.com/bedrock/home?region=${BEDROCK_REGION}"
+   ```
+
+3. **Check the region in the browser's address bar.** This is the most common mistake in this step. The key works only in the region where it is created, and the console may have switched to a different region than you expect. With the default region, the address must look like this:
+
+   ```text
+   https://us-east-1.console.aws.amazon.com/bedrock/home?region=us-east-1#/...
+   ```
+
+   The region appears twice: at the very start of the address, and after `region=`. Both must match the value printed by `echo $BEDROCK_REGION`. If they do not, choose the correct region in the selector at the top right of the console, then look at the address bar again.
+4. In the left menu, select **API keys**.
+5. Select the **Short-term API keys** tab. Look at the address bar one more time to confirm the region, then select **Generate short-term API keys**.
+6. Copy the key. It is long, around three thousand characters. That is normal.
+7. In your terminal, save it. The command asks you to paste the key and does not display it:
+
+   ```bash
+   labvar BEDROCK_API_KEY
+   ```
+
+8. Note the time. Write down when you created the key so you can tell later whether it might have expired.
+9. Check that the key works by calling Bedrock directly:
+
+   ```bash
+   echo "region=[$BEDROCK_REGION] model=[$BEDROCK_MODEL] key length=${#BEDROCK_API_KEY}"
+   ```
+
+   ```bash
+   curl -sS -w '\nHTTP %{http_code}\n' "https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions" -H "Authorization: Bearer ${BEDROCK_API_KEY}" -H "Content-Type: application/json" -d '{"model":"'"${BEDROCK_MODEL}"'","messages":[{"role":"user","content":"Say hello in five words."}]}'
+   ```
+
+   This is the same chat completions call that F5 AI Security will make. It prints Bedrock's reply in full, followed by the HTTP status. It does not print your key.
+
+   **Success** is `HTTP 200` and a reply that contains `"choices"` with a short greeting inside it.
+
+   Anything else is an error, and the reply says what went wrong. If the cause is not obvious, "Diagnose a Bedrock API key" in [Appendix C](#appendix-c---troubleshoot-the-bedrock-connection) inspects the key for you.
+
+   | What you see | Likely cause | What to do |
+   | --- | --- | --- |
+   | `key length=7` in the first line | The key was not saved. The value is still `NOT-SET`. | Run `labvar BEDROCK_API_KEY` again and paste the key |
+   | `Authentication failed: Please make sure your API Key is valid.` | Most often the key was created in a different region. A short-term key works only in the region shown in the console's address bar when you created it. It can also mean the key expired or was not copied whole. | Run the checks in "Diagnose a Bedrock API key" in [Appendix C](#appendix-c---troubleshoot-the-bedrock-connection). They show which region the key belongs to and when it was created. Then create a new key in the right region. |
+   | `HTTP 403` with "not authorized" or "access denied" | Your role lacks `bedrock:InvokeModel` or `bedrock:CallWithBearerToken`, or your organization blocks Bedrock API keys | Give the full reply to your AWS administrator. The role needs both actions. |
+   | `HTTP 400` or `404` that names the model | The model is not available to your account in this region, or is not served on this endpoint | Check the model's card for the endpoints it is served on |
+
+Keep the console tab open. You need the key again under "Add the connection" below.
+
+#### When the key expires
+
+You will know because every prompt starts failing in every client at the same moment, in both the baseline and protected projects, and the direct `curl` check in step 9 above returns `HTTP 401` or `403` instead of `HTTP 200`. To renew:
+
+1. Repeat steps 1 to 9 above to create and save a new key.
+2. In the F5 AI Security UI, go to **Configuration > Connections**. Open the three-dot menu on the `bedrock-lab` connection and select **Manage model**.
+3. Replace the **API key** with the new key and select **Test and connect**.
+
+Nothing else changes. LobeChat and the multi-agent app use F5 project tokens, not the Bedrock key, so they work again immediately without a restart. You will also do this at the start of each new day if you continue with follow-on labs.
+
+#### A long-term key
+
+Use a long-term key only if your instructor tells you to, for example when console sessions in your account are too short for the lab. A long-term key lasts until its expiry date and is backed by an IAM user, so creating one needs permission to create IAM users. Many accounts do not allow that, in which case an administrator creates the key and gives it to you.
+
+1. Follow steps 2 to 4 above.
+2. Select the **Long-term API keys** tab, then **Generate long-term API keys**.
+3. Under **API key expiration**, choose the shortest period that covers the lab.
+4. Leave **Advanced permissions** as it is and select **Generate**.
+5. Copy the key. This is the only time it is shown.
+6. Continue from step 7 above.
+
+If you were handed a key instead of creating one, start at step 7 above.
+
+#### Add the connection
+
+Bedrock exposes a chat completions endpoint, so you use the built-in **OpenAI Compatible** connection type. F5 AI Security then speaks chat completions on both sides: to your clients and to Bedrock.
+
+1. In the menu under **Configuration**, select **Connections**.
+2. On the **Models** tab, find **OpenAI Compatible** and select **Add**.
+3. In your terminal, print the values to type into the form. They come from `lab.env`:
+
+   ```bash
+   echo "Display name: $F5_CONNECTION"
+   echo "Model name:   $BEDROCK_MODEL"
+   echo "URL:          https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/openai/v1/chat/completions"
+   ```
+
+4. Fill in the form:
+
+   | Field | Value |
+   | --- | --- |
+   | **Display name** | The `Display name` printed above. With the defaults it is `bedrock-lab`. |
+   | **Model name** | The `Model name` printed above. With the defaults it is `openai.gpt-oss-120b-1:0`. It is case-sensitive. |
+   | **API key** | The Bedrock API key you just created. Paste it from the console tab you left open. |
+   | **URL** | The `URL` printed above |
+   | **Endpoint** | Chat completions (cannot be changed later) |
+
+5. Select **Test and connect**.
+
+The platform sends the prompt "Hello there" to Bedrock. On success you see **Configuration Saved!** and the connection appears under **Model connections**. On failure nothing is saved. Expand **Error** to read why.
+
+> The **Display name** becomes part of the URL that clients call: `https://<F5_HOST>/openai/<Display name>`. It is a label for the connection, not the model, so it stays the same if you change the model later.
+
+If the test fails, work through these in order:
+
+1. **Check the key and model without F5 in the path.** Run the direct `curl` check above again. If that fails too, the problem is the key, the region, or the model, not the connection.
+2. **Check the URL field.** It must use the region the key was created in, with no space before or after it.
+3. **If the error is "not found" or HTTP 404,** the form in your release may add `/chat/completions` itself. Remove that ending, so the URL stops at `/openai/v1`, and test again.
+4. **If the direct check passes and the test still fails whatever the URL,** you have probably hit the known problem above. Use a long-term key, or go back to step 3.2.
+
+`openai.gpt-oss` models put their reasoning inside the reply text, wrapped in `<reasoning>` tags. Clients show it, and response scans see it.
+
+Reference: <https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-generate.html>
 
 ## Appendix B - Instructor notes
 
@@ -1915,8 +2087,8 @@ Reference: <https://docs.aisecurity.f5.com/onboarding/connections/connect-model-
 None of the following could be tested without a licensed cluster. Run the whole guide once and correct these points.
 
 1. **Guardrail UI labels (3.4).** The connection, project, and token steps follow the public documentation. The steps for enabling guardrails inside a project are described by category because the documentation pages reviewed did not give exact labels. Replace 3.4 with the exact names for your operator version.
-2. **Tool calling through the Bedrock connection (Section 5).** The app forces specific tool calls and asks for JSON output. Confirm that `openai.gpt-oss-120b-1:0` behind the OpenAI Compatible connection honors both. If it does not, pick a Bedrock model that does and change it as described under "Optional - use a different Bedrock model" in step 1.6. To change the default for the whole class, edit `BEDROCK_MODEL` in `config/lab.env.example`.
-3. **Short-term Bedrock key (steps 1.6 and 3.1).** First real use: a key of 3,144 characters was saved correctly by `labvar` on macOS, and a key created in the wrong console region was rejected with `Authentication failed: Please make sure your API Key is valid.` Step 3.1 now has students confirm the region in the address bar. The console address pattern in that step (`https://<region>.console.aws.amazon.com/bedrock/home?region=<region>`) should be confirmed once on a live console. The guide defaults to a short-term key because students cannot create IAM users. Confirm on a live account: (a) how long a console session, and so the key, lasts for your students, and whether it covers Sections 3 to 5; (b) that the OpenAI Compatible connection's **API key** field accepts a key of that length; (c) that replacing the key through **Manage model** restores service without touching projects or tokens; and (d) that the `aws bedrock-runtime converse` check in step 1.6 returns text for the chosen model. If sessions are too short, hand out long-term keys and have students use the fallback in step 3.1.
+2. **Tool calling through the Bedrock connection (Section 5).** The app forces specific tool calls and asks for JSON output. The connection in step 3.2 is a custom template that sends `prompt` and `memory` to Bedrock's Converse API and returns the first text block. Nothing in it forwards OpenAI tool definitions, so the app's happy path is likely to fail with it. This has not been tested. Rehearse Section 5 before offering it. If it fails, the choices are to run the section in mock mode as a demonstration, or to extend the template to carry tools, which is its own piece of work. The earlier OpenAI Compatible method (Appendix A, option 2) would carry tool calls natively, but it failed its connection test on a live run.
+3. **Bedrock connection with AWS credentials (steps 3.1 and 3.2).** This method, the template in `config/bedrock-converse-template.yaml`, and most of [Appendix C](#appendix-c---troubleshoot-the-bedrock-connection) come from a colleague's written walkthrough of a working setup (Amazon Nova Lite in `us-west-2`, SSO credentials). It replaced the Bedrock API key method on 2026-11-23 after that method failed on a live run, see item 16. Not yet confirmed for this lab: (a) the menu names in step 3.2, which combine that walkthrough with an earlier draft of this guide; (b) that `us.amazon.nova-lite-v1:0` works with `BEDROCK_REGION` set to `us-east-1`, since the walkthrough used `us-west-2`; (c) that clients can call a custom connection at `https://<F5_HOST>/openai/<Model display name>/chat/completions` with a project token, which Sections 3 to 5 depend on; (d) that streaming replies work in LobeChat through this connection; (e) how long students' AWS sessions last, and whether that covers Sections 3 to 5; (f) that **Manage model** lets a student replace the six secrets without touching projects or tokens; (g) `scripts/bedrock-creds.sh` on real macOS, Linux and WSL clipboards, which was tested with stand-in `aws` and clipboard commands only; and (h) session tokens longer than 996 characters, for which the script makes larger pieces that the platform may cut short. The secret field's exact length limit is not known.
 4. **Blocked-response shape (Sections 3-5).** The app reports `blocked` when the error body contains `error.cai_error.outcome = "blocked"`. Confirm your release returns that shape so the app shows `blocked` instead of a generic 500 error.
 5. **LobeChat (Section 4).** The containers are published on `127.0.0.1` only. If students must reach LobeChat from another machine, change the `-p` option and set LobeChat's `ACCESS_CODE`. Confirm the pinned tag `lobehub/lobe-chat:1.143.3` pulls, that `NODE_EXTRA_CA_CERTS` makes it trust the lab certificate, and that streamed replies pass through F5 AI Security. `lobehub/lobe-chat` is the v1 single-container image. The v2 image (`lobehub/lobehub`) needs PostgreSQL, Redis, and object storage and is not suitable for a short lab.
 6. **Leak scenario outcome (Check 2).** Whether the baseline answer contains the client data depends on the model following the injected text. Confirm it leaks on baseline and is stopped on protected with your guardrail set. If baseline does not leak, the lab still works as a logging comparison, but the contrast is weaker.
@@ -1929,6 +2101,7 @@ None of the following could be tested without a licensed cluster. Run the whole 
 13. **Stuck model pod recovery and node disk speed.** On a live run the Red Team model pod (26 GB image) sat in `CreateContainerError` with "context deadline exceeded" and "failed to reserve container name" events. It started after the node's root volume was raised to 6000 IOPS and 500 MiB/s with `aws ec2 modify-volume` and the pod was deleted. Both were done together, so which one was needed is not known. `up` now does both: it raises every node's root volume right after the cluster and node groups exist (`TUNE_NODE_VOLUMES`, `NODE_VOLUME_IOPS`, `NODE_VOLUME_THROUGHPUT`), and it deletes a model pod that has been in that state for 5 minutes, up to 3 times. Neither step has run on a live cluster as part of the script; the pod loop was tested against simulated pod states. Confirm on a live cluster that the `Node disks:` lines report each volume raised and that model pods start without a recycle. The volume change needs `ec2:ModifyVolume` and `ec2:DescribeVolumes`, is not part of the launch template, and so does not carry over to a replacement node until `up` runs again. Moving node group creation to an eksctl config file with `volumeIOPS` and `volumeThroughput` would make it permanent.
 14. **VPC limit and leftover stack checks, and the cost estimate.** A second student in a shared account hit "The maximum number of VPCs has been reached", then "Stack already exists", then termination protection on the leftover stack. `preflight` now fails early on both conditions and prints the commands to fix them. Both checks were tested against simulated AWS responses only. Before class in a shared account, raise "VPCs per Region" to the number of students plus the VPCs already there. `scripts/cost-estimate.sh` uses built-in us-east-1 list prices recorded on 2026-11-20 unless the role has `pricing:GetProducts`; the live price lookup was tested against a simulated response only. Check the built-in prices against the AWS pricing pages before quoting a class budget.
 15. **Changing the hostname (option C in 2.6, Appendix F).** `scripts/set-hostname.sh` and the `hostname` action were tested with stand-in tools only, not on a live cluster, and the sandbox could not resolve `sslip.io`, so the success path of `auto` has not run at all. Confirm on a live cluster that after `set-hostname.sh auto` (a) the platform restarts with the new base URL, (b) the login page works under the new name, meaning the login service accepts the new redirect address and does not keep the hostname from the first install, (c) API calls with existing project tokens work, and (d) the chosen `sslip.io` name resolves on the class network. If (b) fails, do not offer option C after deployment; instead pick the hostname before the first `up`. Company DNS servers often block `sslip.io` and `nip.io`, so test from the network students will use.
+16. **Why the Bedrock API key method was dropped (Appendix A, option 2).** On 2026-11-20 a short-term key of 3,144 characters, the model `openai.gpt-oss-120b-1:0`, and the URL `https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions` returned `HTTP 200` when called directly with `curl`, and a pod in the cluster could reach Bedrock, but **Test and connect** on the OpenAI Compatible connection failed with the same error whether or not the URL ended in `/chat/completions`. The error text was not captured and the platform logs showed nothing. A colleague's walkthrough reports that the platform's secret field cuts long values short, at under about 1,000 characters, which would explain it. That explanation is an inference. If you can test it, try a long-term key, which is short, on the OpenAI Compatible connection: if that connects, the truncation is confirmed and option 2 becomes usable wherever long-term keys can be issued. That reply also showed `openai.gpt-oss-120b-1:0` returning its reasoning inside the answer text in `<reasoning>` tags.
 
 ### Class logistics
 
@@ -1960,9 +2133,124 @@ None of the following could be tested without a licensed cluster. Run the whole 
 - Amazon Bedrock, Endpoint availability by models: <https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html>
 - LobeChat, Docker deployment: <https://chat-docs.lobehub.com/en/self-hosting/platform/docker>
 
-## Appendix C - Diagnose a Bedrock API key
+## Appendix C - Troubleshoot the Bedrock connection
 
-Use this when the direct Bedrock check in step 3.1 fails, most often with `Authentication failed: Please make sure your API Key is valid.` It answers three questions without ever displaying your key: is the saved value really a key, which region does it belong to, and is it being refused everywhere or only on one route.
+Use this when **Test and connect** in step 3.2 fails, or when prompts that worked earlier start failing.
+
+### Start here: find which side the problem is on
+
+Run these three checks in order, in a terminal where you have run `source ~/f5-ai-lab/lab.env`. Each is a single line.
+
+1. **Can your own sign-in call the model?**
+
+   ```bash
+   aws bedrock-runtime converse --region "$BEDROCK_REGION" --model-id "$BEDROCK_MODEL" --messages '[{"role":"user","content":[{"text":"Say hello in five words."}]}]' --query 'output.message.content[].text' --output text
+   ```
+
+   No greeting means the problem is in AWS: your sign-in, your role, the model, or the region. Fix that first, using the table in step 3.1. No setting in F5 AI Security can work around it.
+
+2. **Are the credentials still valid, and the right size?**
+
+   ```bash
+   ./scripts/bedrock-creds.sh check
+   ```
+
+   It should report an access key ID of 20 characters, a secret access key of 40, a session token of roughly 1,000, and time left.
+
+3. **Can the cluster reach Bedrock?**
+
+   ```bash
+   kubectl run brtest --rm -i --restart=Never --image=curlimages/curl -- -s -o /dev/null -w "HTTP %{http_code}\n" "https://bedrock-runtime.$BEDROCK_REGION.amazonaws.com/"
+   ```
+
+   Any HTTP code means the network path works. `HTTP 404` is the normal answer. A timeout or "could not resolve" means the cluster has no route out.
+
+If all three pass, the problem is in what was entered in the connection form. Use the next table.
+
+The platform's logs do not help here. At the default log level, a failed connection test writes nothing to the `cai-moderator` logs, and the `f5-ai-sec-inference` logs only report on the built-in guardrail models. The reason for a failure appears in the test result on screen.
+
+### Errors from Test and connect
+
+| The result shows | What it means | What to do |
+| --- | --- | --- |
+| `403`, `UnrecognizedClientException`, "The security token included in the request is invalid" | AWS does not accept the access key ID or the session token. Usual causes: a token piece was cut short or pasted with extra spaces, a secret is empty because its name does not match the template, the key ID has a typo, or the credentials expired. A deactivated long-lived key gives the same error. | Check the six secret names against step 3.2. Run `./scripts/bedrock-creds.sh` again and refill all six, clearing each field first. If check 2 above shows the credentials expired, sign in again first. |
+| `403`, `InvalidSignatureException`, "The request signature we calculated does not match" | AWS accepted the access key ID and the token. The secret access key is the wrong value. | Delete the old value of `awsSecretAccessKey` completely, then paste a fresh one. It is exactly 40 characters. **The error text contains your full session token. Remove it before sharing the error.** |
+| `403`, `AccessDeniedException` | The credentials are valid, but the role may not call that model. If check 1 passed, the form names a different model or region than the one you tested. | Make `modelId` and `awsRegion` match `echo "$BEDROCK_MODEL $BEDROCK_REGION"`. Some models must also be enabled for the account in the Bedrock console. |
+| `ValidationException` about the model ID | The model ID or the region is wrong for this model | Use the ID exactly as its model card shows it, including a `us.` prefix if it has one, and a region that the prefix covers |
+| `429`, or `500` to `504` | Bedrock is throttling or having trouble. The template already retries three times. | Wait and retry. If it persists, ask for a higher Bedrock quota. |
+| Status `200` but `content` is empty | The model returned something other than text as the first part of its reply. Some reasoning models do this. | Use a model whose first reply block is text. See "Optional - use a different Bedrock model" in step 1.6. |
+| Nothing changes after you edit a value | The screen shows an earlier result, or an older saved copy of the template is in use | Run the test again and compare the `Date` and `x-amzn-RequestId` values in the result with the previous ones |
+| A token error, and `./scripts/bedrock-creds.sh` warned that your token is longer than 996 characters | A token piece is longer than the platform's secret field keeps | Tell your instructor. The template needs more token pieces for your account. |
+
+### Prompts worked earlier and now all fail
+
+The credentials in the connection expired. Follow "When the credentials expire" in step 3.2. To see the expiry time of your current sign-in, run `./scripts/bedrock-creds.sh check`.
+
+### `aws configure sso` fails with `InvalidRequestException` on `RegisterClient`
+
+The **SSO region** is wrong. It is the region where your organization's sign-in directory lives, and it has nothing to do with the region your models run in. AWS reports only "Invalid request" and does not say that the region is the problem.
+
+You cannot guess it. This finds it. Put your own start URL on the first line and paste the whole block:
+
+```bash
+U="https://d-xxxxxxxxxx.awsapps.com/start"
+for r in us-east-1 us-east-2 us-west-1 us-west-2 eu-west-1 eu-central-1 ap-southeast-1; do
+  curl -s --max-time 10 -X POST "https://oidc.$r.amazonaws.com/client/register" \
+    -H "Content-Type: application/json" \
+    -d "{\"clientName\":\"probe\",\"clientType\":\"public\",\"scopes\":[\"sso:account:access\"],\"grantTypes\":[\"authorization_code\",\"refresh_token\"],\"redirectUris\":[\"http://127.0.0.1:54321/oauth/callback\"],\"issuerUrl\":\"$U\"}" \
+    | grep -q '"clientId"' && echo "$r => SSO region"
+done
+```
+
+It prints the region whose sign-in service accepts your start URL. Run `aws configure sso` again (step 1.4, method 1) and give that as the SSO region. Do not copy a colleague's start URL or region. Different people can sign in through different directories.
+
+### Copy the credentials by hand
+
+`./scripts/bedrock-creds.sh` does this for you. Use these commands only if the script cannot run on your machine. On Linux, replace `pbcopy` with `xclip -selection clipboard`. On WSL, replace it with `clip.exe`.
+
+Load the credentials into your terminal without displaying them:
+
+```bash
+eval "$(aws configure export-credentials --format env)"
+```
+
+Copy one value, paste it into its secret, then run the next line:
+
+```bash
+printf '%s' "$AWS_ACCESS_KEY_ID" | pbcopy
+```
+```bash
+printf '%s' "$AWS_SECRET_ACCESS_KEY" | pbcopy
+```
+```bash
+printf '%s' "${AWS_SESSION_TOKEN:0:249}" | pbcopy
+```
+```bash
+printf '%s' "${AWS_SESSION_TOKEN:249:249}" | pbcopy
+```
+```bash
+printf '%s' "${AWS_SESSION_TOKEN:498:249}" | pbcopy
+```
+```bash
+printf '%s' "${AWS_SESSION_TOKEN:747}" | pbcopy
+```
+
+Those six lines are, in order, `awsAccessKeyId`, `awsSecretAccessKey`, and `awsSessionTokenPart1` to `awsSessionTokenPart4`. Note when the credentials expire, then remove them from the terminal:
+
+```bash
+echo "$AWS_CREDENTIAL_EXPIRATION"
+```
+```bash
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_CREDENTIAL_EXPIRATION
+```
+
+If you signed in with method 2 in step 1.4, where the keys live only in your terminal, skip the `unset` line. It would sign your command line out.
+
+Copy through the clipboard as shown. Selecting text in the terminal with the mouse tends to pick up stray spaces or cut long values.
+
+### Diagnose a Bedrock API key (Appendix A, option 2 only)
+
+Use this when the direct `curl` check in Appendix A, option 2 fails, most often with `Authentication failed: Please make sure your API Key is valid.` It answers three questions without ever displaying your key: is the saved value really a key, which region does it belong to, and is it being refused everywhere or only on one route.
 
 Run it in a terminal where you have run `source ~/f5-ai-lab/lab.env`. Paste the whole block as one piece.
 
@@ -2000,13 +2288,13 @@ How to read the output:
 | `starts with` | `'bedrock-api-key-'` | The wrong text was copied, for example a whole `export ...=` line. Copy only the key and run `labvar BEDROCK_API_KEY` again. |
 | `length` | Around 3,000 for a short-term key. A long-term key is much shorter. | `7` means the value is still `NOT-SET`. A few hundred or less for a short-term key means it was cut short. Save it again. |
 | `unexpected characters` | `none` | The paste picked up extra characters. Save the key again. If it keeps happening, tell your instructor, because it points to a problem with the `labvar` command on your system. |
-| `region inside key` | The same value as `region the lab expects` | The key was created with the console set to another region. Create a new key, checking the address bar as in step 3.1. This is the most common cause. |
+| `region inside key` | The same value as `region the lab expects` | The key was created with the console set to another region. Create a new key, checking the address bar as described in Appendix A. This is the most common cause. |
 | `created (UTC)` compared with `now (UTC)` | A creation time shortly before now | The key is old. A short-term key lasts at most 12 hours and ends when the console session that created it ends. Create a new one. |
 | The final `curl` | `HTTP 200` and a reply containing a greeting | See below |
 
 Reading the final `curl`, which calls Bedrock's native API with the same key:
 
-- **It succeeds, but the check in step 3.1 failed:** the key is good and the problem is the chat completions route for this model. See "Optional - use a different Bedrock model" in step 1.6, and tell your instructor.
+- **It succeeds, but the chat completions check failed:** the key is good and the problem is the chat completions route for this model. Tell your instructor.
 - **It fails the same way:** the key is refused everywhere. If the region and age look right, your organization may block Bedrock API keys. Run the step 1.6 check again. If that still prints a greeting, your role can call the model but keys are not allowed, and you need your AWS administrator or the long-term key fallback in step 3.1.
 
 Notes:
@@ -2190,6 +2478,7 @@ The first line must show your own values, not `CHANGEME` or defaults you had rep
 
 ### Things to know
 
+- **Your model is kept too.** The default model changed from `openai.gpt-oss-120b-1:0` to `us.amazon.nova-lite-v1:0` when the lab moved to the connection in step 3.2. The refresh keeps whatever you had. Step 3.1 shows how to switch.
 - **Your connection name is kept.** Newer versions of the example use `bedrock-lab` as the default connection name, where older ones used `bedrock-gpt-oss`. The refresh keeps whatever you had, which is correct: the name must match the **Display name** of the connection you already created in F5 AI Security.
 - **New settings take their defaults.** If an update adds a setting to `config/guardrails-poc.env.example`, your own `guardrails-poc.env` does not have it, and the script uses the default. To see what is new, compare the setting names:
 
