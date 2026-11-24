@@ -1,0 +1,53 @@
+# AWS Bedrock Converse template for the Red Team and Guardrails platform.
+# Works with Amazon Nova and any other Converse-compatible Bedrock model.
+#
+# Each request is signed with the platform's native awsAuth (SigV4), service "bedrock".
+# The SSO session token is about 996 characters and the platform's secret field
+# truncates long values, so the token arrives as four secrets (awsSessionTokenPart1
+# to Part4, 249 characters each) and is joined back together before signing.
+# With long-lived access keys there is no session token, so leave the four empty.
+#
+# Secrets: awsAccessKeyId, awsSecretAccessKey, awsSessionTokenPart1 to Part4
+# Inputs:  awsRegion, modelId, prompt, memory, maxTokens, temperature, topP
+#
+# Notes:
+#   service must be "bedrock".
+#   The role or user needs bedrock:InvokeModel on the model or inference profile.
+#   awsRegion must be a region the inference profile covers (us. profiles use US regions).
+#   SSO credentials expire. Check the expiry when you export them, and refresh
+#   all six secret values together.
+outputs:
+  content: '{{ content }}'
+  responseBody: '{{ responseBody }}'
+  statusCode: '{{ statusCode }}'
+type: workflow
+stages:
+  - type: retry
+    attempts: 3
+    backoff: '{{ 2 * attempt }}'
+    block:
+      outputs:
+        content: '{{ responseStatus == 200 ? responseJson.output.message.content[0].text : responseBody }}'
+        responseBody: '{{ responseBody }}'
+        statusCode: '{{ responseStatus }}'
+      type: request
+      method: POST
+      awsAuth:
+        accessKey: '{{ awsAccessKeyId }}'
+        secretKey: '{{ awsSecretAccessKey }}'
+        region: '{{ awsRegion }}'
+        service: 'bedrock'
+        token: '{{ awsSessionTokenPart1 + awsSessionTokenPart2 + awsSessionTokenPart3 + awsSessionTokenPart4 }}'
+      json: >-
+        {{ {messages: [...Func.reduce((messages, memoryElem) => [...messages,
+        {role: 'user', content: [{text: memoryElem[0]}]}, {role: 'assistant',
+        content: [{text: memoryElem[1]}]}], [], memory), {role: 'user', content:
+        [{text: prompt}]}], inferenceConfig: {maxTokens: maxTokens, temperature:
+        temperature, topP: topP}} }}
+      timeout: 300
+      url: 'https://bedrock-runtime.{{ awsRegion }}.amazonaws.com/model/{{ modelId }}/converse'
+      headers:
+        Accept: application/json
+        Content-Type: application/json
+      queryParams: {}
+    when: '{{ Array.contains([429, 500, 502, 503, 504], statusCode) }}'

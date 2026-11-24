@@ -133,6 +133,18 @@ Options: `--config FILE` uses a config file other than `config/guardrails-poc.en
 
 The script is idempotent. If deployment stops partway through, rerun `up`; it reuses existing AWS and Kubernetes resources and continues from the current state.
 
+### Connect Amazon Bedrock
+
+The lab connects Bedrock through a custom connection that calls the Converse API and signs each request with AWS credentials. The template is `config/bedrock-converse-template.yaml`. The credentials are entered as six secrets, with the session token split into four pieces because the platform's secret field cuts long values short.
+
+```bash
+./scripts/bedrock-creds.sh check       # lengths and expiry of your current AWS sign-in; prints no values
+./scripts/bedrock-creds.sh template    # copy the template to the clipboard
+./scripts/bedrock-creds.sh             # copy each secret to the clipboard in turn, with the field to paste it into
+```
+
+Steps are in Section 3 of the lab guide, and troubleshooting in its Appendix C. The earlier method, an OpenAI Compatible connection with a Bedrock API key, is in Appendix A; it failed its connection test on a live run with a short-term key.
+
 ### Change the Hostname
 
 `scripts/set-hostname.sh` changes the hostname of a running deployment: `HOSTNAME` in the config, `F5_HOST` in `lab.env`, the platform base URL, the certificate, and the ingress rule. It then runs the `hostname` action of `guardrails-poc.sh`.
